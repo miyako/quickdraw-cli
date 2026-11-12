@@ -164,6 +164,30 @@ fn nfnt_lengths_locations_optional_tables_and_limits_are_checked() {
 }
 
 #[test]
+fn text_metadata_lengths_preserve_unknown_extensions_without_guessing() {
+    for (op, known) in [(0x2d, 8), (0x2e, 4)] {
+        for extra in [-1, 0, 2] {
+            let length = known + extra;
+            let mut data = word(length);
+            data.extend(vec![0; length as usize]);
+            let mut p = picture();
+            p.op(op, &data).op(0x28, &[0, 3, 0, 0, 1, b'A']);
+            let parsed = parse(&p.finish(), Container::Raw, &Limits::default());
+            if extra < 0 {
+                assert_eq!(parsed.unwrap_err().code, ErrorCode::Malformed);
+            } else {
+                let result = render(&parsed.unwrap(), &options());
+                if extra == 0 {
+                    assert!(result.is_ok());
+                } else {
+                    assert_eq!(result.unwrap_err().code, ErrorCode::Unsupported);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn cli_font_map_is_explicit_relative_and_cannot_overwrite_font_sources() {
     let dir = tempfile::tempdir().unwrap();
     let font = dir.path().join("font.nfnt");

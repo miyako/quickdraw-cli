@@ -366,10 +366,18 @@ fn command(
                 }
                 Command::Metadata(data)
             } else {
-                if (op == 0x2d && n != 8) || (op == 0x2e && n != 4) {
+                let known_size = if op == 0x2d { 8 } else { 4 };
+                if n < known_size {
                     return Err(malformed("invalid text metadata length"));
                 }
-                Command::TextState { opcode: op, data }
+                if n > known_size {
+                    Command::Unsupported {
+                        feature: "extended_text_state",
+                        data,
+                    }
+                } else {
+                    Command::TextState { opcode: op, data }
+                }
             }
         }
         0x30..=0x6c if op & 7 <= 4 => {

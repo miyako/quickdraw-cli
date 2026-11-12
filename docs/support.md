@@ -30,6 +30,7 @@ emits an operation-offset warning for every accepted approximation.
 | CopyBits modes 0-7 | Mono strict; non-copy color PixMaps require approximate mode |
 | v2 reserved opcodes with documented sizes | Retained/skipped with `reserved_opcode` diagnostics; unknown/v2-only opcodes in v1 fail |
 | Text state and font-name metadata | Exact font ID/size/face selection; font names retained without system lookup; unsupported layout settings fail at text use |
+| Length-prefixed text settings (`2D`, `2E`) | Known 8-byte lineJustify / 4-byte glyphState bodies; short bodies malformed, unknown extensions retained but unsupported, not guessed |
 | Text (`28`-`2B`) | Explicit native-size one-bit NFNT/FONT bindings; srcOr/srcBic; integer metrics and spacing; deltas from previous text start; advances graphics pen |
 | Printer comments (`A0`, `A1`) | Raw bytes and kind retained; strict fails; approximate warns that comment semantics are ignored |
 | Origin (`0C`) | Horizontal/vertical delta; local clip/pen/last-shape state preserved; prior pixels do not move |
