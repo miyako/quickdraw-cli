@@ -39,11 +39,11 @@ The package is `quickdraw-cli`; the library crate is `quickdraw`.
 use quickdraw::{Container, Limits, RenderOptions, parse, render, encode_png};
 
 fn example(bytes: &[u8]) -> quickdraw::Result<()> {
-let picture = parse(bytes, Container::Auto, &Limits::default())?;
-let report = picture.inspect(); // Parsing is not a renderability guarantee.
-let rendered = render(&picture, &RenderOptions::default())?;
-let png_bytes = encode_png(&rendered.image, 72.0)?;
-// Retain rendered.diagnostics with the converted file.
+    let picture = parse(bytes, Container::Auto, &Limits::default())?;
+    let report = picture.inspect(); // Parsing is not a renderability guarantee.
+    let rendered = render(&picture, &RenderOptions::default())?;
+    let png_bytes = encode_png(&rendered.image, 72.0)?;
+    // Retain rendered.diagnostics with the converted file.
     // Use report and png_bytes in the calling application.
     Ok(())
 }

@@ -109,7 +109,8 @@ or a claim of exact linked-component coverage.
 
 ## Distribution limitations
 
-Artifacts are unsigned and not notarized; platform quarantine, Gatekeeper and
+Artifacts have no publisher signature and are not notarized; `signed: false`
+does not exclude a linker's automatic ad-hoc Mach-O signature. Platform quarantine, Gatekeeper and
 Windows trust policies may require additional release work. The CLI workflow has
 read-only repository permissions, no signing secrets and no release publishing
 step. CI downloads are retained for 30 days and are not a durable public release
