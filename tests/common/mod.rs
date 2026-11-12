@@ -122,3 +122,11 @@ pub fn direct(depth: u16, pack: u16, width: i16, row_bytes: u16, encoded: &[u8])
     result.extend(encoded);
     result
 }
+
+pub fn nfnt() -> Vec<u8> {
+    let mut bytes = words(&[0x1000, 65, 66, 4, 0, 0, 3, 3, 12, 3, 0, 0, 1]);
+    bytes.extend([0x5c, 0, 0xb4, 0, 0xfc, 0]); // authored A, B, missing glyph
+    bytes.extend(words(&[0, 3, 5, 6])); // A, B, missing, end
+    bytes.extend(words(&[4, 0x0103, 2, -1])); // bearings/advances and terminator
+    bytes
+}

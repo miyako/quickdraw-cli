@@ -170,6 +170,18 @@ pub struct Rect {
 }
 
 impl Rect {
+    pub(crate) fn translated(self, delta: Point) -> Result<Self> {
+        let add = |a: i32, b: i32| {
+            a.checked_add(b)
+                .ok_or_else(|| Error::new(ErrorCode::ResourceLimit, "coordinate range exceeded"))
+        };
+        Ok(Self {
+            top: add(self.top, delta.y)?,
+            bottom: add(self.bottom, delta.y)?,
+            left: add(self.left, delta.x)?,
+            right: add(self.right, delta.x)?,
+        })
+    }
     pub fn width(self) -> usize {
         (self.right as i64 - self.left as i64).max(0) as usize
     }
@@ -231,13 +243,48 @@ pub(crate) enum Verb {
 pub(crate) enum Shape {
     Rect(Rect),
     Oval(Rect),
-    Polygon { bounds: Rect, points: Vec<Point> },
+    RoundRect(Rect),
+    Arc {
+        bounds: Rect,
+        start: i32,
+        sweep: i32,
+    },
+    Polygon {
+        bounds: Rect,
+        points: Vec<Point>,
+    },
     Region(Region),
 }
 #[derive(Debug)]
 pub(crate) enum Pixels {
     Mono(Vec<u8>),
     Rgb(Vec<u8>),
+}
+#[derive(Debug)]
+pub(crate) enum Pattern {
+    Bits([u8; 8]),
+    Solid([u8; 3]),
+    Color { bounds: Rect, rgb: Vec<u8> },
+}
+impl Pattern {
+    pub fn sample(&self, x: i32, y: i32) -> [u8; 3] {
+        match self {
+            Self::Bits(bits) => {
+                [if bits[y.rem_euclid(8) as usize] & (0x80 >> x.rem_euclid(8)) != 0 {
+                    0
+                } else {
+                    255
+                }; 3]
+            }
+            Self::Solid(color) => *color,
+            Self::Color { bounds, rgb } => {
+                let x = x.rem_euclid(bounds.width() as i32) as usize;
+                let y = y.rem_euclid(bounds.height() as i32) as usize;
+                let i = (y * bounds.width() + x) * 3;
+                [rgb[i], rgb[i + 1], rgb[i + 2]]
+            }
+        }
+    }
 }
 #[derive(Debug)]
 pub(crate) struct Bitmap {
@@ -253,14 +300,30 @@ pub(crate) struct Bitmap {
 pub(crate) enum Command {
     Nop,
     Clip(Region),
-    BackgroundPattern([u8; 8]),
-    PenPattern([u8; 8]),
-    FillPattern([u8; 8]),
+    BackgroundPattern(Pattern),
+    PenPattern(Pattern),
+    FillPattern(Pattern),
     Foreground([u8; 3]),
     Background([u8; 3]),
     PenSize(Point),
     PenMode(u16),
+    Origin(Point),
+    OvalSize(Point),
+    OpColor([u16; 3]),
+    HighlightColor(Option<[u8; 3]>),
+    Highlight,
     Line(Point, Point),
+    LineFrom(Point),
+    ShortLineFrom(Point),
+    TextState {
+        opcode: u16,
+        data: Vec<u8>,
+    },
+    Text {
+        position: Option<Point>,
+        delta: Point,
+        bytes: Vec<u8>,
+    },
     Draw(Verb, Shape),
     Bitmap(Bitmap),
     Comment {
@@ -368,13 +431,19 @@ impl Picture {
                             info.kind = "reserved";
                             info.data_hex = Some(hex(data));
                         }
-                        Command::Metadata(data) => {
+                        Command::Text { bytes: data, .. } => {
+                            info.kind = "text";
+                            info.data_hex = Some(hex(data));
+                        }
+                        Command::TextState { data, .. } | Command::Metadata(data) => {
                             info.kind = "metadata";
                             info.data_hex = Some(hex(data));
                         }
                         Command::Draw(_, _) => info.kind = "shape",
                         Command::Bitmap(_) => info.kind = "bitmap",
-                        Command::Line(_, _) => info.kind = "line",
+                        Command::Line(_, _) | Command::LineFrom(_) | Command::ShortLineFrom(_) => {
+                            info.kind = "line"
+                        }
                         _ => {}
                     }
                     info

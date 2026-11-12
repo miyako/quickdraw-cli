@@ -34,6 +34,9 @@ It verifies native host identity, Mach-O/PE architecture, executable file type
 and the binary's JSON `--version` contract. CI builds the binary immediately
 before packaging from that same commit; a local caller must do the same, since
 matching a version string alone cannot prove source provenance.
+Native CI also parses generated SVG/PDF documents with test-only Python
+dependencies. These dependencies are not runtime requirements and are not
+bundled in the CLI archives.
 
 Files produced (example version):
 
@@ -96,6 +99,12 @@ directory, preserve executable permissions on macOS, select the host architectur
 explicitly, and invoke `--version`/`capabilities` before conversion. Keep the
 original PICT separately and retain warnings and content hashes with results.
 Do not infer fidelity or feature completeness from an asset being available.
+The additive protocol-1 extension exposes `--font-map` schema 1 and explicit
+SVG/PDF `preserve`/`raster` policies. Fonts are not bundled or downloaded; a caller
+must provide appropriately licensed extracted NFNT resources and preserve them
+alongside the PICT. Probe capabilities rather than assuming every font, codec or
+vector operation is supported. Use `source_revision` and archive integrity, not
+the development version string alone, to identify an exact milestone build.
 
 Archives use sorted members, a fixed 1980 timestamp, explicit Unix permissions,
 canonical JSON and stored (uncompressed) members. Identical binary, source/docs,

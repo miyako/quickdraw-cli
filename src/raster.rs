@@ -7,6 +7,8 @@ pub struct RenderOptions {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub limits: Limits,
+    pub highlight: Option<[u8; 3]>,
+    pub fonts: crate::FontBook,
 }
 impl Default for RenderOptions {
     fn default() -> Self {
@@ -16,6 +18,8 @@ impl Default for RenderOptions {
             width: None,
             height: None,
             limits: Limits::default(),
+            highlight: None,
+            fonts: crate::FontBook::default(),
         }
     }
 }
@@ -43,15 +47,23 @@ pub struct Rendered {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-struct State<'a> {
-    clip: Option<&'a Region>,
-    foreground: [u8; 3],
-    background: [u8; 3],
-    pen_pattern: [u8; 8],
-    background_pattern: [u8; 8],
-    fill_pattern: [u8; 8],
-    pen: Point,
-    mode: u16,
+pub(crate) struct State<'a> {
+    pub clip: Option<&'a Region>,
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub pen_pattern: &'a Pattern,
+    pub background_pattern: &'a Pattern,
+    pub fill_pattern: &'a Pattern,
+    pub pen: Point,
+    pub mode: u16,
+    pub origin: Point,
+    pub oval: Point,
+    pub op_color: Option<[u16; 3]>,
+    pub highlight_color: Option<[u8; 3]>,
+    pub highlight: bool,
+    pub text: crate::font::TextState,
+    pub pen_location: Point,
+    pub text_start: Point,
 }
 impl Default for State<'_> {
     fn default() -> Self {
@@ -59,12 +71,79 @@ impl Default for State<'_> {
             clip: None,
             foreground: [0; 3],
             background: [255; 3],
-            pen_pattern: [255; 8],
-            background_pattern: [0; 8],
-            fill_pattern: [255; 8],
+            pen_pattern: &Pattern::Bits([255; 8]),
+            background_pattern: &Pattern::Bits([0; 8]),
+            fill_pattern: &Pattern::Bits([255; 8]),
             pen: Point { x: 1, y: 1 },
             mode: 8,
+            origin: Point { x: 0, y: 0 },
+            oval: Point { x: 0, y: 0 },
+            op_color: None,
+            highlight_color: None,
+            highlight: false,
+            text: crate::font::TextState::new(),
+            pen_location: Point { x: 0, y: 0 },
+            text_start: Point { x: 0, y: 0 },
         }
+    }
+}
+impl<'a> State<'a> {
+    pub fn update(&mut self, command: &'a Command, options: &RenderOptions) -> Result<bool> {
+        match command {
+            Command::Nop | Command::Metadata(_) => {}
+            Command::Clip(region) => self.clip = Some(region),
+            Command::BackgroundPattern(p) => self.background_pattern = p,
+            Command::PenPattern(p) => self.pen_pattern = p,
+            Command::FillPattern(p) => self.fill_pattern = p,
+            Command::Foreground(c) => self.foreground = *c,
+            Command::Background(c) => self.background = *c,
+            Command::PenSize(p) => self.pen = *p,
+            Command::PenMode(mode) => self.mode = *mode,
+            Command::Origin(delta) => {
+                let add = |a: i32, b: i32| {
+                    a.checked_add(b)
+                        .ok_or_else(|| Error::new(ErrorCode::ResourceLimit, "origin overflow"))
+                };
+                self.origin = Point {
+                    x: add(self.origin.x, delta.x)?,
+                    y: add(self.origin.y, delta.y)?,
+                };
+            }
+            Command::OvalSize(size) => self.oval = *size,
+            Command::OpColor(color) => self.op_color = Some(*color),
+            Command::HighlightColor(color) => self.highlight_color = color.or(options.highlight),
+            Command::Highlight => self.highlight = true,
+            Command::TextState { opcode, data } => self.text.update(*opcode, data)?,
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+    pub fn drawing(&self, verb: Verb) -> (&Pattern, u16) {
+        match verb {
+            Verb::Frame | Verb::Paint => (self.pen_pattern, self.mode),
+            Verb::Erase => (self.background_pattern, 8),
+            Verb::Fill => (self.fill_pattern, 8),
+            Verb::Invert => (&Pattern::Bits([255; 8]), 2),
+        }
+    }
+    fn validate(&self, mode: u16, pattern: bool) -> Result<()> {
+        check_mode(mode, pattern)?;
+        if matches!(mode, 32 | 33 | 35) && self.op_color.is_none() {
+            return Err(Error::new(
+                ErrorCode::Unsupported,
+                "blend/addPin/subPin requires explicit OpColor",
+            ));
+        }
+        if self.is_highlight(mode) && self.highlight_color.is_none() {
+            return Err(Error::new(
+                ErrorCode::Unsupported,
+                "system highlight color is unknown; specify --highlight or HiliteColor",
+            ));
+        }
+        Ok(())
+    }
+    fn is_highlight(&self, mode: u16) -> bool {
+        matches!(mode, 50 | 52 | 58 | 60) || (self.highlight && matches!(mode, 2 | 10))
     }
 }
 
@@ -80,41 +159,78 @@ impl Canvas {
         let index = ((y - self.frame.top) as usize * self.frame.width()
             + (x - self.frame.left) as usize)
             * 3;
-        for (dest, src) in self.rgb[index..index + 3].iter_mut().zip(source) {
-            *dest = transfer(src, *dest, mode);
+        let dest = &mut self.rgb[index..index + 3];
+        if state.is_highlight(mode) {
+            if source != [255; 3] {
+                let highlight = state.highlight_color.expect("validated highlight color");
+                if dest == state.background {
+                    dest.copy_from_slice(&highlight);
+                } else if dest == highlight {
+                    dest.copy_from_slice(&state.background);
+                }
+            }
+            return;
+        }
+        if matches!(mode, 36 | 44) && source == state.background {
+            return;
+        }
+        for c in 0..3 {
+            dest[c] = if mode >= 32 {
+                arithmetic(source[c], dest[c], mode, state.op_color.map(|v| v[c]))
+            } else {
+                let mode = mode & 7;
+                let src = if mode & 4 != 0 { !source[c] } else { source[c] };
+                let fg = state.foreground[c];
+                let bg = state.background[c];
+                match mode & 3 {
+                    0 => {
+                        ((u32::from(255 - src) * u32::from(fg) + u32::from(src) * u32::from(bg))
+                            / 255) as u8
+                    }
+                    1 => (src | fg) & dest[c],
+                    2 => {
+                        if source == [if mode & 4 == 0 { 0 } else { 255 }; 3] {
+                            !dest[c]
+                        } else {
+                            dest[c]
+                        }
+                    }
+                    _ => (!src & bg) | dest[c],
+                }
+            };
         }
     }
     fn patterned(&mut self, x: i32, y: i32, verb: Verb, state: &State<'_>) {
-        let (pattern, mode) = match verb {
-            Verb::Frame | Verb::Paint => (&state.pen_pattern, state.mode),
-            Verb::Erase => (&state.background_pattern, 8),
-            Verb::Fill => (&state.fill_pattern, 8),
-            Verb::Invert => {
-                self.apply(x, y, [0; 3], 2, state);
-                return;
-            }
-        };
-        let bit = pattern[y.rem_euclid(8) as usize] & (0x80 >> x.rem_euclid(8));
-        let color = if bit != 0 {
-            state.foreground
-        } else {
-            state.background
-        };
-        self.apply(x, y, color, mode, state);
+        let (pattern, mode) = state.drawing(verb);
+        let color = pattern.sample(x - state.origin.x, y - state.origin.y);
+        if matches!(pattern, Pattern::Bits(_)) {
+            self.apply(x, y, color, mode, state);
+        } else if self.frame.contains(x, y) && state.clip.is_none_or(|clip| clip.contains(x, y)) {
+            let i = ((y - self.frame.top) as usize * self.frame.width()
+                + (x - self.frame.left) as usize)
+                * 3;
+            self.rgb[i..i + 3].copy_from_slice(&color);
+        }
     }
 }
 
 // QuickDraw monochrome logical ink uses one for black; RGB uses zero for black.
-fn transfer(source: u8, dest: u8, mode: u16) -> u8 {
-    match mode & 7 {
-        0 => source,
-        1 => source & dest,
-        2 => !(source ^ dest),
-        3 => !source | dest,
-        4 => !source,
-        5 => !source & dest,
-        6 => source ^ dest,
-        _ => source | dest,
+fn arithmetic(source: u8, dest: u8, mode: u16, op: Option<u16>) -> u8 {
+    match mode {
+        32 => {
+            let weight = u64::from(op.expect("validated OpColor"));
+            ((u64::from(source) * weight + u64::from(dest) * (65535 - weight)) / 65535) as u8
+        }
+        33 => (u16::from(source) + u16::from(dest)).min(op.expect("validated OpColor") >> 8) as u8,
+        34 => source.wrapping_add(dest),
+        35 => dest
+            .saturating_sub(source)
+            .max((op.expect("validated OpColor") >> 8) as u8),
+        36 | 44 => source,
+        37 => source.max(dest),
+        38 => dest.wrapping_sub(source),
+        39 => source.min(dest),
+        _ => unreachable!("validated transfer mode"),
     }
 }
 
@@ -136,7 +252,10 @@ fn require_approximate(
 }
 
 fn check_mode(mode: u16, pattern: bool) -> Result<()> {
-    if (pattern && (8..=15).contains(&mode)) || (!pattern && mode <= 7) {
+    if (pattern && ((8..=15).contains(&mode) || mode == 44))
+        || (!pattern && mode <= 7)
+        || matches!(mode, 32..=39 | 50 | 52 | 58 | 60)
+    {
         Ok(())
     } else {
         Err(Error::new(
@@ -146,7 +265,7 @@ fn check_mode(mode: u16, pattern: bool) -> Result<()> {
     }
 }
 
-fn output_size(frame: Rect, options: &RenderOptions) -> Result<(usize, usize)> {
+pub(crate) fn output_size(frame: Rect, options: &RenderOptions) -> Result<(usize, usize)> {
     let (w, h) = (frame.width() as u64, frame.height() as u64);
     let (width, height) = match (options.width, options.height) {
         (None, None) => (w, h),
@@ -187,7 +306,10 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
     for _ in 0..pixels {
         canvas.rgb.extend_from_slice(&options.background);
     }
-    let mut state = State::default();
+    let mut state = State {
+        highlight_color: options.highlight,
+        ..Default::default()
+    };
     let mut diagnostics = vec![Diagnostic::new(
         "unverified_fidelity",
         "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity.",
@@ -196,19 +318,11 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
     for op in &picture.operations {
         let result = (|| {
             budget.work(1)?;
+            if state.update(&op.command, options)? {
+                canvas.frame = frame.translated(state.origin)?;
+                return Ok(());
+            }
             match &op.command {
-                Command::Nop | Command::Metadata(_) => {}
-                Command::Clip(region) => state.clip = Some(region),
-                Command::BackgroundPattern(p) => state.background_pattern = *p,
-                Command::PenPattern(p) => state.pen_pattern = *p,
-                Command::FillPattern(p) => state.fill_pattern = *p,
-                Command::Foreground(c) => state.foreground = *c,
-                Command::Background(c) => state.background = *c,
-                Command::PenSize(p) => state.pen = *p,
-                Command::PenMode(mode) => {
-                    check_mode(*mode, true)?;
-                    state.mode = *mode;
-                }
                 Command::Unsupported { feature, .. } => {
                     return Err(Error::new(
                         ErrorCode::Unsupported,
@@ -230,7 +344,11 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                         Some(op.offset),
                     ));
                 }
-                Command::Line(from, to) => {
+                Command::Line(_, _) | Command::LineFrom(_) | Command::ShortLineFrom(_) => {
+                    let (from, to) = line_points(&op.command, &state)?;
+                    if matches!(state.pen_pattern, Pattern::Bits(_)) {
+                        state.validate(state.mode, true)?;
+                    }
                     if from.x != to.x && from.y != to.y {
                         require_approximate(
                             options,
@@ -239,15 +357,47 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                             "diagonal line uses integer Bresenham coverage",
                         )?;
                     }
-                    line(&mut canvas, *from, *to, &state, &mut budget)?;
+                    line(&mut canvas, from, to, &state, &mut budget)?;
+                    state.pen_location = to;
+                    state.highlight = false;
+                }
+                Command::Text { .. } => {
+                    let glyphs = layout_text(&mut state, &op.command, options, &mut budget)?;
+                    state.validate(state.text.mode, false)?;
+                    for placed in glyphs {
+                        let area = placed.bounds.intersect(canvas.frame);
+                        if area.width() == 0 || area.height() == 0 {
+                            continue;
+                        }
+                        for y in area.top..area.bottom {
+                            for x in area.left..area.right {
+                                if placed.glyph.ink(
+                                    (x - placed.bounds.left) as usize,
+                                    (y - placed.bounds.top) as usize,
+                                ) {
+                                    canvas.apply(x, y, [0; 3], state.text.mode, &state);
+                                }
+                            }
+                        }
+                    }
+                    diagnostics.push(Diagnostic::new("explicit_bitmap_font", format!("NFNT id={}, size={}, face={}; caller-supplied identity, no substitution", state.text.id, state.text.size, state.text.face), Some(op.offset)));
+                    state.highlight = false;
                 }
                 Command::Draw(verb, shape) => {
-                    if matches!(shape, Shape::Oval(_) | Shape::Polygon { .. })
-                        || matches!(
-                            (verb, shape),
-                            (Verb::Frame, Shape::Region(Region { mask: Some(_), .. }))
-                        )
-                    {
+                    let (pattern, mode) = state.drawing(*verb);
+                    if matches!(pattern, Pattern::Bits(_)) {
+                        state.validate(mode, !matches!(verb, Verb::Invert))?;
+                    }
+                    if matches!(
+                        shape,
+                        Shape::Oval(_)
+                            | Shape::RoundRect(_)
+                            | Shape::Arc { .. }
+                            | Shape::Polygon { .. }
+                    ) || matches!(
+                        (verb, shape),
+                        (Verb::Frame, Shape::Region(Region { mask: Some(_), .. }))
+                    ) {
                         require_approximate(
                             options,
                             &mut diagnostics,
@@ -256,10 +406,11 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                         )?;
                     }
                     draw(&mut canvas, *verb, shape, &state, &mut budget)?;
+                    state.highlight = false;
                 }
                 Command::Bitmap(bitmap) => {
-                    check_mode(bitmap.mode, false)?;
-                    if matches!(bitmap.pixels, Pixels::Rgb(_)) && bitmap.mode != 0 {
+                    state.validate(bitmap.mode, false)?;
+                    if matches!(bitmap.pixels, Pixels::Rgb(_)) && (1..=7).contains(&bitmap.mode) {
                         require_approximate(
                             options,
                             &mut diagnostics,
@@ -268,7 +419,9 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                         )?;
                     }
                     blit(&mut canvas, bitmap, &state, &mut budget)?;
+                    state.highlight = false;
                 }
+                _ => unreachable!("state command already handled"),
             }
             Ok(())
         })();
@@ -311,6 +464,92 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
     })
 }
 
+pub(crate) fn line_points(command: &Command, state: &State<'_>) -> Result<(Point, Point)> {
+    let from = state.pen_location;
+    Ok(match command {
+        Command::Line(from, to) => (*from, *to),
+        Command::LineFrom(to) => (from, *to),
+        Command::ShortLineFrom(delta) => {
+            let x = from.x.checked_add(delta.x);
+            let y = from.y.checked_add(delta.y);
+            let (Some(x), Some(y)) = (x, y) else {
+                return Err(Error::new(
+                    ErrorCode::ResourceLimit,
+                    "line coordinate overflow",
+                ));
+            };
+            if i16::try_from(x).is_err() || i16::try_from(y).is_err() {
+                return Err(Error::new(
+                    ErrorCode::Malformed,
+                    "short line coordinate overflow",
+                ));
+            }
+            (from, Point { x, y })
+        }
+        _ => unreachable!("line command"),
+    })
+}
+
+pub(crate) struct PlacedGlyph<'a> {
+    pub glyph: crate::font::Glyph<'a>,
+    pub bounds: Rect,
+}
+
+pub(crate) fn layout_text<'a>(
+    state: &mut State<'_>,
+    command: &Command,
+    options: &'a RenderOptions,
+    budget: &mut Budget<'_>,
+) -> Result<Vec<PlacedGlyph<'a>>> {
+    let Command::Text {
+        position,
+        delta,
+        bytes,
+    } = command
+    else {
+        unreachable!("text command")
+    };
+    state.text.check()?;
+    let add = |a: i32, b: i32| {
+        a.checked_add(b)
+            .ok_or_else(|| Error::new(ErrorCode::ResourceLimit, "text coordinate overflow"))
+    };
+    let baseline = match position {
+        Some(point) => *point,
+        None => Point {
+            x: add(state.text_start.x, delta.x)?,
+            y: add(state.text_start.y, delta.y)?,
+        },
+    };
+    state.text_start = baseline;
+    let mut x = baseline.x;
+    if bytes.is_empty() {
+        state.pen_location = baseline;
+        return Ok(Vec::new());
+    }
+    let font = options
+        .fonts
+        .get(state.text.id, state.text.size, state.text.face)?;
+    budget.allocate(bytes.len() * std::mem::size_of::<PlacedGlyph<'_>>())?;
+    let mut glyphs = Vec::with_capacity(bytes.len());
+    for &code in bytes {
+        let glyph = font.glyph(code)?;
+        budget.work((glyph.width * glyph.height + 1) as u64)?;
+        let left = add(x, glyph.bearing)?;
+        let top = add(baseline.y, -glyph.ascent)?;
+        let bounds = Rect {
+            left,
+            top,
+            right: add(left, glyph.width as i32)?,
+            bottom: add(top, glyph.height as i32)?,
+        };
+        x = add(x, add(glyph.advance, state.text.spacing(code))?)?;
+        glyphs.push(PlacedGlyph { glyph, bounds });
+    }
+    state.pen_location = Point { x, y: baseline.y };
+    Ok(glyphs)
+}
+
 fn oval_contains(rect: Rect, x: i32, y: i32) -> bool {
     if !rect.contains(x, y) {
         return false;
@@ -320,6 +559,71 @@ fn oval_contains(rect: Rect, x: i32, y: i32) -> bool {
     let dx = 2 * (x - rect.left) as i128 + 1 - w;
     let dy = 2 * (y - rect.top) as i128 + 1 - h;
     dx * dx * h * h + dy * dy * w * w <= w * w * h * h
+}
+
+fn round_contains(rect: Rect, size: Point, x: i32, y: i32) -> bool {
+    if !rect.contains(x, y) {
+        return false;
+    }
+    let w = size.x.min(rect.width() as i32);
+    let h = size.y.min(rect.height() as i32);
+    if w <= 0 || h <= 0 {
+        return true;
+    }
+    let px = 2 * (x - rect.left) + 1;
+    let py = 2 * (y - rect.top) + 1;
+    if (px >= w && px <= 2 * rect.width() as i32 - w)
+        || (py >= h && py <= 2 * rect.height() as i32 - h)
+    {
+        return true;
+    }
+    let left = if px < w { rect.left } else { rect.right - w };
+    let top = if py < h { rect.top } else { rect.bottom - h };
+    oval_contains(
+        Rect {
+            left,
+            top,
+            right: left + w,
+            bottom: top + h,
+        },
+        x,
+        y,
+    )
+}
+
+fn arc_contains(rect: Rect, start: i32, sweep: i32, x: i32, y: i32) -> bool {
+    if sweep.abs() >= 360 {
+        return true;
+    }
+    if sweep == 0 {
+        return false;
+    }
+    let (start, extent) = if sweep < 0 {
+        (start + sweep, -sweep)
+    } else {
+        (start, sweep)
+    };
+    let direction = |angle: i32| {
+        let angle = (angle.rem_euclid(360) as f64).to_radians();
+        (
+            (angle.sin() * 1_000_000_000.0).round() as i128,
+            (-angle.cos() * 1_000_000_000.0).round() as i128,
+        )
+    };
+    let a = direction(start);
+    let b = direction(start + extent);
+    let px = (2 * x - rect.left - rect.right + 1) as i128 * rect.height() as i128;
+    let py = (2 * y - rect.top - rect.bottom + 1) as i128 * rect.width() as i128;
+    if px == 0 && py == 0 {
+        return true;
+    }
+    let after_start = a.0 * py - a.1 * px >= 0;
+    let before_end = px * b.1 - py * b.0 > 0;
+    if extent <= 180 {
+        after_start && before_end
+    } else {
+        after_start || before_end
+    }
 }
 
 fn polygon_contains(points: &[Point], x: i32, y: i32) -> bool {
@@ -370,7 +674,8 @@ fn draw(
         return Ok(());
     }
     let bounds = match shape {
-        Shape::Rect(r) | Shape::Oval(r) => *r,
+        Shape::Rect(r) | Shape::Oval(r) | Shape::RoundRect(r) => *r,
+        Shape::Arc { bounds, .. } => *bounds,
         Shape::Polygon { bounds, .. } => *bounds,
         Shape::Region(region) => region.bounds,
     };
@@ -392,6 +697,12 @@ fn draw(
             let inside = match shape {
                 Shape::Rect(_) => true,
                 Shape::Oval(rect) => oval_contains(*rect, x, y),
+                Shape::RoundRect(rect) => round_contains(*rect, state.oval, x, y),
+                Shape::Arc {
+                    bounds,
+                    start,
+                    sweep,
+                } => oval_contains(*bounds, x, y) && arc_contains(*bounds, *start, *sweep, x, y),
                 Shape::Polygon { points, .. } => polygon_contains(points, x, y),
                 Shape::Region(region) => region.contains(x, y),
             };
@@ -402,6 +713,18 @@ fn draw(
                 let interior = match shape {
                     Shape::Rect(rect) => rect.inset(state.pen.x, state.pen.y).contains(x, y),
                     Shape::Oval(rect) => oval_contains(rect.inset(state.pen.x, state.pen.y), x, y),
+                    Shape::RoundRect(rect) => round_contains(
+                        rect.inset(state.pen.x, state.pen.y),
+                        Point {
+                            x: (state.oval.x.min(rect.width() as i32) - 2 * state.pen.x).max(0),
+                            y: (state.oval.y.min(rect.height() as i32) - 2 * state.pen.y).max(0),
+                        },
+                        x,
+                        y,
+                    ),
+                    Shape::Arc { bounds, .. } => {
+                        oval_contains(bounds.inset(state.pen.x, state.pen.y), x, y)
+                    }
                     Shape::Region(region) if region.mask.is_none() => {
                         region.bounds.inset(state.pen.x, state.pen.y).contains(x, y)
                     }
@@ -552,13 +875,7 @@ fn blit(
             let index = (sy - bitmap.bounds.top) as usize * bitmap.bounds.width()
                 + (sx - bitmap.bounds.left) as usize;
             let color = match &bitmap.pixels {
-                Pixels::Mono(pixels) => {
-                    if pixels[index] == 0 {
-                        state.background
-                    } else {
-                        state.foreground
-                    }
-                }
+                Pixels::Mono(pixels) => [if pixels[index] == 0 { 255 } else { 0 }; 3],
                 Pixels::Rgb(pixels) => [
                     pixels[index * 3],
                     pixels[index * 3 + 1],

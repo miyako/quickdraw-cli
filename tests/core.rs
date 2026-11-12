@@ -495,9 +495,6 @@ fn polygon_even_odd_fill_and_diagonal_lines_are_explicit_approximations() {
 fn unsupported_drawing_is_never_silently_discarded() {
     for (op, data) in [
         (0x28, vec![0, 0, 0, 0, 1, b'A']),
-        (0x0c, vec![0; 4]),
-        (0x41, rect(0, 0, 2, 2)),
-        (0x1c, vec![]),
         (0x8200, vec![0, 0, 0, 2, 1, 2]),
     ] {
         let mut p = Pict::new(2, 4, 4);

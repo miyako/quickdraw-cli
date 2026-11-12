@@ -160,7 +160,6 @@ pub fn parse(data: &[u8], container: Container, limits: &Limits) -> Result<Pictu
     }
     let mut operations = Vec::new();
     let mut last_rect = None;
-    let mut pen = Point { x: 0, y: 0 };
     loop {
         if version == 2 && r.pos % 2 == 1 {
             let pad = r.u8()?;
@@ -184,14 +183,7 @@ pub fn parse(data: &[u8], container: Container, limits: &Limits) -> Result<Pictu
         }
         budget.allocate(std::mem::size_of::<Operation>())?;
         budget.work(1)?;
-        let result = command(
-            &mut r,
-            opcode,
-            version,
-            &mut budget,
-            &mut last_rect,
-            &mut pen,
-        );
+        let result = command(&mut r, opcode, version, &mut budget, &mut last_rect);
         let command = result.map_err(|mut e| {
             if e.offset.is_none() {
                 e.offset = Some(offset);
@@ -263,7 +255,6 @@ fn command(
     version: u8,
     budget: &mut Budget<'_>,
     last_rect: &mut Option<Rect>,
-    pen: &mut Point,
 ) -> Result<Command> {
     if version == 1
         && !matches!(
@@ -280,7 +271,7 @@ fn command(
     Ok(match op {
         0 => Command::Nop,
         1 => Command::Clip(region(r, budget)?),
-        2 => Command::BackgroundPattern(r.pattern()?),
+        2 => Command::BackgroundPattern(Pattern::Bits(r.pattern()?)),
         7 => {
             let p = r.point()?;
             if p.x < 0 || p.y < 0 {
@@ -289,33 +280,51 @@ fn command(
             Command::PenSize(p)
         }
         8 => Command::PenMode(r.u16()?),
-        9 => Command::PenPattern(r.pattern()?),
-        10 => Command::FillPattern(r.pattern()?),
+        9 => Command::PenPattern(Pattern::Bits(r.pattern()?)),
+        10 => Command::FillPattern(Pattern::Bits(r.pattern()?)),
+        0x0b => {
+            let size = r.point()?;
+            if size.x < 0 || size.y < 0 {
+                return Err(malformed("negative oval size"));
+            }
+            Command::OvalSize(size)
+        }
         0x0e => Command::Foreground(classic_color(r.u32()?)?),
         0x0f => Command::Background(classic_color(r.u32()?)?),
         0x1a => Command::Foreground(r.color()?),
         0x1b => Command::Background(r.color()?),
-        0x03 | 0x05 | 0x0d | 0x15 | 0x16 => Command::Metadata(r.blob(2, budget)?),
-        0x04 => Command::Metadata(r.blob(1, budget)?),
-        0x06 | 0x0b => Command::Metadata(r.blob(4, budget)?),
-        0x10 => Command::Metadata(r.blob(8, budget)?),
-        0x1d | 0x1f => Command::Metadata(r.blob(6, budget)?),
-        0x1e => Command::Metadata(Vec::new()),
-        0x0c => Command::Unsupported {
-            feature: "origin_change",
+        0x03 | 0x05 | 0x0d | 0x15 | 0x16 => Command::TextState {
+            opcode: op,
+            data: r.blob(2, budget)?,
+        },
+        0x04 => Command::TextState {
+            opcode: op,
+            data: r.blob(1, budget)?,
+        },
+        0x06 => Command::TextState {
+            opcode: op,
             data: r.blob(4, budget)?,
         },
-        0x1c => Command::Unsupported {
-            feature: "highlight_mode",
-            data: Vec::new(),
+        0x10 => Command::TextState {
+            opcode: op,
+            data: r.blob(8, budget)?,
         },
-        0x20..=0x23 => {
-            let from = if op == 0x20 || op == 0x22 {
-                r.point()?
-            } else {
-                *pen
-            };
-            let to = if op <= 0x21 {
+        0x1d => Command::HighlightColor(Some(r.color()?)),
+        0x1f => Command::OpColor([r.u16()?, r.u16()?, r.u16()?]),
+        0x1e => Command::HighlightColor(None),
+        0x0c => Command::Origin(Point {
+            x: r.i16()?,
+            y: r.i16()?,
+        }),
+        0x1c => Command::Highlight,
+        0x21 => Command::LineFrom(r.point()?),
+        0x23 => Command::ShortLineFrom(Point {
+            x: r.u8()? as i8 as i32,
+            y: r.u8()? as i8 as i32,
+        }),
+        0x20 | 0x22 => {
+            let from = r.point()?;
+            let to = if op == 0x20 {
                 r.point()?
             } else {
                 let x = from.x + r.u8()? as i8 as i32;
@@ -325,27 +334,43 @@ fn command(
                 }
                 Point { x, y }
             };
-            *pen = to;
             Command::Line(from, to)
         }
         0x28..=0x2b => {
-            let prefix = match op {
-                0x28 => 4,
-                0x29 | 0x2a => 1,
-                _ => 2,
+            let position = if op == 0x28 { Some(r.point()?) } else { None };
+            let delta = Point {
+                x: if op == 0x29 || op == 0x2b {
+                    r.u8()? as i32
+                } else {
+                    0
+                },
+                y: if op == 0x2a || op == 0x2b {
+                    r.u8()? as i32
+                } else {
+                    0
+                },
             };
-            let mut data = r.blob(prefix, budget)?;
             let count = r.u8()? as usize;
-            data.push(count as u8);
-            data.extend(r.blob(count, budget)?);
-            Command::Unsupported {
-                feature: "text",
-                data,
+            Command::Text {
+                position,
+                delta,
+                bytes: r.blob(count, budget)?,
             }
         }
         0x2c..=0x2e => {
             let n = r.u16()? as usize;
-            Command::Metadata(r.blob(n, budget)?)
+            let data = r.blob(n, budget)?;
+            if op == 0x2c {
+                if n < 3 || data[2] as usize + 3 != n {
+                    return Err(malformed("invalid fontName length"));
+                }
+                Command::Metadata(data)
+            } else {
+                if (op == 0x2d && n != 8) || (op == 0x2e && n != 4) {
+                    return Err(malformed("invalid text metadata length"));
+                }
+                Command::TextState { opcode: op, data }
+            }
         }
         0x30..=0x6c if op & 7 <= 4 => {
             let rect = if op & 8 == 0 {
@@ -357,32 +382,19 @@ fn command(
                     .ok_or_else(|| malformed("same-shape opcode without a preceding rectangle"))?
             };
             let family = op & 0xf0;
-            if family == 0x40 || family == 0x60 {
-                let mut data = Vec::new();
-                for coordinate in [rect.top, rect.left, rect.bottom, rect.right] {
-                    data.extend_from_slice(&(coordinate as i16).to_be_bytes());
-                }
-                if family == 0x60 {
-                    data.extend(r.blob(4, budget)?);
-                }
-                Command::Unsupported {
-                    feature: if family == 0x40 {
-                        "rounded_rectangle"
-                    } else {
-                        "arc"
+            Command::Draw(
+                verb(op),
+                match family {
+                    0x30 => Shape::Rect(rect),
+                    0x40 => Shape::RoundRect(rect),
+                    0x50 => Shape::Oval(rect),
+                    _ => Shape::Arc {
+                        bounds: rect,
+                        start: r.i16()?,
+                        sweep: r.i16()?,
                     },
-                    data,
-                }
-            } else {
-                Command::Draw(
-                    verb(op),
-                    if family == 0x30 {
-                        Shape::Rect(rect)
-                    } else {
-                        Shape::Oval(rect)
-                    },
-                )
-            }
+                },
+            )
         }
         0x70..=0x74 => {
             let size = r.u16()? as usize;
@@ -431,7 +443,14 @@ fn command(
                 data: r.blob(size, budget)?,
             }
         }
-        0x12..=0x14 => return Err(unsupported("pixel patterns are not supported")),
+        0x12..=0x14 => {
+            let pattern = pixel_pattern(r, budget)?;
+            match op {
+                0x12 => Command::BackgroundPattern(pattern),
+                0x13 => Command::PenPattern(pattern),
+                _ => Command::FillPattern(pattern),
+            }
+        }
         0x24..=0x27 | 0x2f | 0x92..=0x97 | 0x9c..=0x9f | 0xa2..=0xaf => {
             let size = r.u16()? as usize;
             Command::Reserved(r.blob(size, budget)?)
@@ -578,6 +597,56 @@ fn bitmap(r: &mut Reader<'_>, op: u16, version: u8, budget: &mut Budget<'_>) -> 
             return Err(malformed("invalid direct PixMap base address sentinel"));
         }
     }
+    let layout = map_layout(r, direct, version, budget)?;
+    if matches!(op, 0x90 | 0x91) && layout.row_bytes >= 8 {
+        return Err(malformed("BitsRect/BitsRgn requires rowBytes less than 8"));
+    }
+    let bounds = layout.bounds;
+    let source = r.rect()?;
+    let destination = r.rect()?;
+    if source.width() == 0
+        || source.height() == 0
+        || source.left < bounds.left
+        || source.top < bounds.top
+        || source.right > bounds.right
+        || source.bottom > bounds.bottom
+    {
+        return Err(malformed("bitmap source rectangle outside bounds or empty"));
+    }
+    let mode = r.u16()?;
+    let mask = if op & 1 != 0 {
+        Some(region(r, budget)?)
+    } else {
+        None
+    };
+    let pixels = map_pixels(r, layout, op & 8 != 0, budget)?;
+    Ok(Bitmap {
+        bounds,
+        source,
+        destination,
+        mode,
+        mask,
+        pixels,
+    })
+}
+
+struct MapLayout {
+    bounds: Rect,
+    row_bytes: usize,
+    pixmap: bool,
+    direct: bool,
+    pack_type: u16,
+    depth: u16,
+    components: u16,
+    palette: [Option<[u8; 3]>; 256],
+}
+
+fn map_layout(
+    r: &mut Reader<'_>,
+    direct: bool,
+    version: u8,
+    budget: &Budget<'_>,
+) -> Result<MapLayout> {
     let row_word = r.u16()?;
     let pixmap = row_word & 0x8000 != 0;
     if row_word & 0x4000 != 0 {
@@ -589,10 +658,7 @@ fn bitmap(r: &mut Reader<'_>, op: u16, version: u8, budget: &mut Budget<'_>) -> 
     if width == 0 || height == 0 || row_bytes == 0 || row_bytes % 2 != 0 {
         return Err(malformed("invalid bitmap dimensions or rowBytes"));
     }
-    if matches!(op, 0x90 | 0x91) && row_bytes >= 8 {
-        return Err(malformed("BitsRect/BitsRgn requires rowBytes less than 8"));
-    }
-    let pixels = budget.limits.pixels(width, height)?;
+    budget.limits.pixels(width, height)?;
     let (mut pack_type, mut depth, mut components) = (0, 1u16, 1u16);
     let mut palette = [None; 256];
     if pixmap {
@@ -656,23 +722,36 @@ fn bitmap(r: &mut Reader<'_>, op: u16, version: u8, budget: &mut Budget<'_>) -> 
     if width * depth as usize > row_bytes * 8 {
         return Err(malformed("rowBytes smaller than bitmap width"));
     }
-    let source = r.rect()?;
-    let destination = r.rect()?;
-    if source.width() == 0
-        || source.height() == 0
-        || source.left < bounds.left
-        || source.top < bounds.top
-        || source.right > bounds.right
-        || source.bottom > bounds.bottom
-    {
-        return Err(malformed("bitmap source rectangle outside bounds or empty"));
-    }
-    let mode = r.u16()?;
-    let mask = if op & 1 != 0 {
-        Some(region(r, budget)?)
-    } else {
-        None
-    };
+    Ok(MapLayout {
+        bounds,
+        row_bytes,
+        pixmap,
+        direct,
+        pack_type,
+        depth,
+        components,
+        palette,
+    })
+}
+
+fn map_pixels(
+    r: &mut Reader<'_>,
+    layout: MapLayout,
+    packed_opcode: bool,
+    budget: &mut Budget<'_>,
+) -> Result<Pixels> {
+    let MapLayout {
+        bounds,
+        row_bytes,
+        pixmap,
+        direct,
+        mut pack_type,
+        depth,
+        components,
+        palette,
+    } = layout;
+    let (width, height) = (bounds.width(), bounds.height());
+    let pixels = budget.limits.pixels(width, height)?;
     if direct && pack_type == 0 {
         pack_type = if depth == 16 { 3 } else { 4 };
     }
@@ -683,7 +762,7 @@ fn bitmap(r: &mut Reader<'_>, op: u16, version: u8, budget: &mut Budget<'_>) -> 
         && if direct {
             pack_type >= 3
         } else {
-            op & 8 != 0 && pack_type != 1
+            packed_opcode && pack_type != 1
         };
     let row_size = if direct && row_bytes >= 8 && depth == 32 && pack_type == 4 {
         row_bytes / 4 * components as usize
@@ -759,16 +838,33 @@ fn bitmap(r: &mut Reader<'_>, op: u16, version: u8, budget: &mut Budget<'_>) -> 
             }
         }
     }
-    Ok(Bitmap {
-        bounds,
-        source,
-        destination,
-        mode,
-        mask,
-        pixels: if pixmap {
-            Pixels::Rgb(decoded)
-        } else {
-            Pixels::Mono(decoded)
-        },
+    Ok(if pixmap {
+        Pixels::Rgb(decoded)
+    } else {
+        Pixels::Mono(decoded)
     })
+}
+
+fn pixel_pattern(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Pattern> {
+    let kind = r.u16()?;
+    let old = r.pattern()?;
+    match kind {
+        0 => Ok(Pattern::Bits(old)),
+        2 => Ok(Pattern::Solid(r.color()?)),
+        1 => {
+            let layout = map_layout(r, false, 2, budget)?;
+            if !layout.pixmap {
+                return Err(malformed("pixel pattern requires a PixMap"));
+            }
+            let bounds = layout.bounds;
+            if !bounds.width().is_power_of_two() || !bounds.height().is_power_of_two() {
+                return Err(malformed("pixel pattern dimensions must be powers of two"));
+            }
+            match map_pixels(r, layout, true, budget)? {
+                Pixels::Rgb(rgb) => Ok(Pattern::Color { bounds, rgb }),
+                Pixels::Mono(_) => unreachable!(),
+            }
+        }
+        _ => Err(unsupported("unknown pixel pattern type")),
+    }
 }

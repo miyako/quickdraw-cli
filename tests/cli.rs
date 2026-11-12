@@ -69,7 +69,7 @@ fn version_and_capabilities_are_machine_readable_not_clap_version_text() {
         json!({"protocol":1,"version":env!("CARGO_PKG_VERSION")})
     );
     let caps = success(&text(&["capabilities"]));
-    assert_eq!(caps["formats"], json!(["png", "svg"]));
+    assert_eq!(caps["formats"], json!(["png", "svg", "pdf"]));
     assert_eq!(caps["fidelity"]["classic_oracle_validated"], false);
     error(
         &text(&["--version", "capabilities"]),
@@ -205,7 +205,7 @@ fn missing_input_unknown_format_invalid_limits_and_invalid_colors_fail() {
     error(&convert(&input, &output, &[]), 3, "io");
     fixture(&input);
     error(
-        &convert(&input, &dir.path().join("out.pdf"), &[]),
+        &convert(&input, &dir.path().join("out.webp"), &[]),
         2,
         "invalid_arguments",
     );

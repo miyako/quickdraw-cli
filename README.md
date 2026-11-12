@@ -1,14 +1,17 @@
 # quickdraw-cli
 
 A standalone Rust QuickDraw PICT parsing library and conversion CLI for macOS and
-Windows. Converts a **documented subset** to opaque PNG, or to explicitly
-raster-backed SVG. No Apple graphics frameworks, external converters, fonts, or
-network services are used during conversion.
+Windows. Converts a **documented subset** to opaque PNG, or to SVG/PDF with
+explicit preserved-path or whole-picture raster policies. Supports explicitly
+supplied bitmap fonts. No Apple graphics frameworks, external converters, system
+font search, or network services are used during conversion.
 
 **Not a fully capable QuickDraw emulator or a general archival migration tool.**
-Text, fonts, QuickTime images, origin changes, arcs, rounded rectangles, pixel
-patterns, and several transfer modes remain unsupported. Unsupported drawing
-fails instead of disappearing. Classic-Mac pixel fidelity has not been established.
+Origin changes, rounded rectangles, arcs, pixel patterns, arithmetic/highlight
+modes and native-size one-bit NFNT text are implemented with explicit limitations.
+QuickTime images, outline/scaled/multibyte text, several modes and mixed vector
+operations remain unsupported. Unsupported drawing fails instead of disappearing.
+Classic-Mac pixel fidelity has not been established.
 The separate `miyako/quickdraw` 4D component is not implemented here.
 
 ```sh
@@ -19,6 +22,9 @@ target/release/quickdraw inspect --input drawing.pict
 target/release/quickdraw convert --input drawing.pict --output drawing.png
 target/release/quickdraw convert --input drawing.pict --output drawing.svg \
   --fidelity approximate --vector-policy raster
+target/release/quickdraw convert --input geometry.pict --output geometry.pdf \
+  --fidelity approximate --vector-policy preserve
+target/release/quickdraw convert --input text.pict --output text.png --font-map fonts.json
 ```
 
 On Windows, use `target/release/quickdraw.exe`. All paths are explicit; output files
@@ -50,9 +56,13 @@ fn example(bytes: &[u8]) -> quickdraw::Result<()> {
 ```
 
 The parser retains ordered operations, source offsets, header bytes and comments.
-The renderer interprets them into a single destination framebuffer. Encoders
-consume the final image; no backend can accidentally drop a destination-dependent
-operation or substitute a font. Library API stability follows the crate's
+The raster renderer interprets them into a single destination framebuffer.
+`export_vector` emits genuine paths for supported operations, sharing state and
+font layout with raster rendering; it rejects unsupported vector operations
+instead of silently substituting pixels. `encode_pdf` and `encode_svg` embed a
+complete rendered image when the caller explicitly chooses that policy.
+`BitmapFont::parse` and `FontBook::insert` supply exact font bindings.
+Library API stability follows the crate's
 pre-1.0 version; the separately versioned CLI envelope is intended for
 `4D.SystemWorker`.
 
@@ -66,11 +76,22 @@ cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 python3 scripts/test_assets.py
+python3 -m venv .venv-documents
+.venv-documents/bin/python -m pip install -r scripts/requirements-test.txt
+.venv-documents/bin/python scripts/test_documents.py
 ```
+
+On Windows, the virtual environment interpreter is
+`.venv-documents/Scripts/python.exe`. The document tests require the debug CLI
+built by `cargo test`; `QUICKDRAW_BINARY` can select a different native binary.
+Remove the local test environment when finished; it is not part of an asset.
 
 Tests construct original synthetic PICT data, verify specific pixels and failure
 paths, and exercise the CLI as a subprocess. Their expected output is not an
-independent classic-Mac oracle. Native macOS ARM64, macOS x86_64 and Windows x86_64
+independent classic-Mac oracle. The document tests independently parse PDF with
+pypdf and SVG with Python's XML parser; this checks document structure and
+selected content, not historical rendering fidelity.
+Native macOS ARM64, macOS x86_64 and Windows x86_64
 CI jobs run tests before producing unsigned archives. CI artifacts are not
 published releases.
 

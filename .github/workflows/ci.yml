@@ -44,6 +44,8 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked --all-targets
           python scripts/test_assets.py
+          python -m pip install -r scripts/requirements-test.txt
+          python scripts/test_documents.py
       - name: Build locked release binary
         run: cargo build --locked --release --target "${{ matrix.target }}"
       - name: Package twice and verify integrity and reproducibility

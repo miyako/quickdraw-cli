@@ -1,5 +1,6 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use quickdraw::{Container, Error, ErrorCode, Fidelity, Limits, RenderOptions, Result};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -23,7 +24,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Convert to opaque PNG or explicitly raster-backed SVG.
+    /// Convert to PNG, or explicit preserved-vector/raster-backed SVG or PDF.
     Convert(Convert),
     /// Parse and inspect opcodes/comments; does not promise renderability.
     Inspect(Input),
@@ -68,11 +69,13 @@ impl ResourceLimits {
 enum Format {
     Png,
     Svg,
+    Pdf,
 }
 #[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum VectorPolicy {
     Reject,
     Raster,
+    Preserve,
 }
 #[derive(Args)]
 struct Convert {
@@ -80,13 +83,13 @@ struct Convert {
     input: Input,
     #[arg(long)]
     output: PathBuf,
-    /// Explicit format, otherwise inferred from .png or .svg output suffix.
+    /// Explicit format, otherwise inferred from .png, .svg or .pdf suffix.
     #[arg(long, value_enum)]
     format: Option<Format>,
     /// Strict rejects known approximate geometry/comments; neither mode is an emulator.
     #[arg(long, value_enum, default_value = "strict")]
     fidelity: Fidelity,
-    /// SVG requires raster: embed the entire composited image.
+    /// SVG/PDF: preserve genuine paths or rasterize the complete composited image.
     #[arg(long, value_enum, default_value = "reject")]
     vector_policy: VectorPolicy,
     /// Final pixel width; with height omitted, preserve aspect ratio.
@@ -101,6 +104,12 @@ struct Convert {
     /// Initial opaque canvas color, RRGGBB (independent of QuickDraw BkColor).
     #[arg(long, default_value = "ffffff", value_parser = parse_color)]
     background: [u8; 3],
+    /// Explicit system highlight color for pictures that do not carry HiliteColor.
+    #[arg(long, value_parser = parse_color)]
+    highlight: Option<[u8; 3]>,
+    /// JSON schema 1 mapping source font ID/size/face to extracted NFNT files.
+    #[arg(long)]
+    font_map: Option<PathBuf>,
     /// Atomically replace an existing regular output file, never the input or its aliases.
     #[arg(long)]
     overwrite: bool,
@@ -115,6 +124,82 @@ fn parse_color(text: &str) -> std::result::Result<[u8; 3], String> {
 }
 fn io_error(error: std::io::Error) -> Error {
     Error::new(ErrorCode::Io, error.to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FontMap {
+    schema: u32,
+    fonts: Vec<FontBinding>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FontBinding {
+    id: i16,
+    size: u16,
+    #[serde(default)]
+    face: u8,
+    path: PathBuf,
+}
+fn load_fonts(
+    path: Option<&Path>,
+    limits: &Limits,
+    output: &Path,
+) -> Result<(quickdraw::FontBook, Vec<PathBuf>)> {
+    let mut book = quickdraw::FontBook::default();
+    let Some(path) = path else {
+        return Ok((book, Vec::new()));
+    };
+    let mut sources = vec![path.to_path_buf()];
+    require_utf8(path)?;
+    output_path(path, output, true)?;
+    let read = |path: &Path| -> Result<Vec<u8>> {
+        require_utf8(path)?;
+        let file = File::open(path).map_err(io_error)?;
+        if !file.metadata().map_err(io_error)?.is_file() {
+            return Err(Error::new(
+                ErrorCode::Io,
+                "font source must be a regular file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take((limits.max_input_bytes as u64).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(io_error)?;
+        if bytes.len() > limits.max_input_bytes {
+            return Err(Error::new(
+                ErrorCode::ResourceLimit,
+                "font source byte limit exceeded",
+            ));
+        }
+        Ok(bytes)
+    };
+    let map: FontMap = serde_json::from_slice(&read(path)?).map_err(|e| {
+        Error::new(
+            ErrorCode::InvalidArguments,
+            format!("invalid font map: {e}"),
+        )
+    })?;
+    if map.schema != 1 {
+        return Err(Error::new(
+            ErrorCode::InvalidArguments,
+            "unsupported font map schema",
+        ));
+    }
+    if map.fonts.len() > limits.max_operations {
+        return Err(Error::new(
+            ErrorCode::ResourceLimit,
+            "font binding count limit exceeded",
+        ));
+    }
+    for binding in map.fonts {
+        let font_path = path.parent().unwrap_or(Path::new(".")).join(binding.path);
+        output_path(&font_path, output, true)?;
+        let font = quickdraw::BitmapFont::parse(&read(&font_path)?, limits)?;
+        book.insert(binding.id, binding.size, binding.face, font, limits)?;
+        sources.push(font_path);
+    }
+    Ok((book, sources))
 }
 
 fn read_input(input: &Input) -> Result<Vec<u8>> {
@@ -232,8 +317,12 @@ fn capabilities() -> Value {
     json!({
         "protocol": 1, "version": env!("CARGO_PKG_VERSION"),
         "library": "quickdraw", "binary": "quickdraw",
-        "formats": ["png", "svg"],
-        "svg": "whole_picture_raster_only_requires_explicit_opt_in",
+        "formats": ["png", "svg", "pdf"],
+        "svg": "explicit_preserved_paths_or_whole_picture_raster",
+        "pdf": "pdf_1_4_explicit_preserved_paths_or_whole_picture_raster",
+        "vector_policies": ["reject", "preserve", "raster"],
+        "vector_profile": "portable_paths_v1",
+        "font_map_schema": 1,
         "containers": ["auto", "raw", "file"],
         "pict_versions": [1, 2],
         "raster_profile": "portable_rgb_v1",
@@ -247,14 +336,21 @@ fn capabilities() -> Value {
             "rectangular_and_transition_regions", "ordered_boolean_compositing",
             "monochrome_bitmaps", "indexed_1_2_4_8_bit_pixmaps",
             "rgb555_and_rgb32_pixmaps", "packbits_byte_and_word_runs",
-            "source_destination_bitmap_rectangles", "bitmap_region_masks"
+            "source_destination_bitmap_rectangles", "bitmap_region_masks",
+            "origin_changes", "pixel_patterns", "explicit_highlight_color",
+            "arithmetic_transfer_modes_32_to_39", "transparent_pattern_mode_44",
+            "explicit_nfnt_single_byte_native_size_faces", "text_start_and_pen_advancement",
+            "svg_and_pdf_uniform_copy_geometry", "whole_picture_svg_pdf_raster"
         ],
-        "approximate_only": ["ovals", "polygons", "diagonal_lines", "complex_region_outlines", "printer_comments", "color_bitmap_boolean_modes"],
+        "approximate_only": ["ovals", "rounded_rectangles", "arcs", "polygons", "diagonal_lines", "complex_region_outlines", "printer_comments", "color_bitmap_boolean_modes"],
         "unsupported": [
-            "text_and_fonts", "origin_changes", "arcs", "rounded_rectangles",
-            "pixel_patterns", "highlight_mode", "arithmetic_transfer_modes",
+            "implicit_system_fonts", "outline_fonts", "scaled_or_fractional_text",
+            "multibyte_text", "nfnt_optional_tables", "text_modes_other_than_srcOr_srcBic",
+            "dithering", "default_system_highlight_without_explicit_color",
+            "vector_destination_modes_tiled_patterns_bitmaps",
+            "vector_diagonal_polygon_arc_complex_region_frames",
             "quicktime_codecs", "resource_fork_maps", "macbinary", "appledouble",
-            "editable_vector_output", "pdf", "classic_screen_pixel_identity"
+            "classic_screen_pixel_identity"
         ],
         "default_limits": Limits::default(),
         "exit_codes": {"success":0,"arguments":2,"io_or_output_conflict":3,"malformed":4,"unsupported":5,"resource_limit":6,"encoding":7},
@@ -297,25 +393,26 @@ fn execute(cli: Cli) -> Result<Value> {
                     {
                         "png" => Some(Format::Png),
                         "svg" => Some(Format::Svg),
+                        "pdf" => Some(Format::Pdf),
                         _ => None,
                     }
                 })
                 .ok_or_else(|| {
                     Error::new(
                         ErrorCode::InvalidArguments,
-                        "select --format png|svg or use a .png/.svg suffix",
+                        "select --format png|svg|pdf or use a matching suffix",
                     )
                 })?;
-            if format == Format::Svg && args.vector_policy != VectorPolicy::Raster {
+            if format != Format::Png && args.vector_policy == VectorPolicy::Reject {
                 return Err(Error::new(
                     ErrorCode::Unsupported,
-                    "SVG is raster-backed only; explicitly select --vector-policy raster",
+                    "SVG/PDF requires explicit --vector-policy preserve or raster",
                 ));
             }
-            if format != Format::Svg && args.vector_policy == VectorPolicy::Raster {
+            if format == Format::Png && args.vector_policy != VectorPolicy::Reject {
                 return Err(Error::new(
                     ErrorCode::InvalidArguments,
-                    "--vector-policy raster applies only to SVG",
+                    "--vector-policy applies only to SVG/PDF",
                 ));
             }
             if !args.dpi.is_finite() || args.dpi <= 0.0 || args.dpi > 100_000.0 {
@@ -326,36 +423,79 @@ fn execute(cli: Cli) -> Result<Value> {
             }
             let target = output_path(&args.input.input, &args.output, args.overwrite)?;
             let bytes = read_input(&args.input)?;
+            let (fonts, font_sources) = load_fonts(
+                args.font_map.as_deref(),
+                &args.input.limits.value(),
+                &args.output,
+            )?;
             let options = RenderOptions {
                 fidelity: args.fidelity,
                 background: args.background,
                 width: args.width,
                 height: args.height,
                 limits: args.input.limits.value(),
+                highlight: args.highlight,
+                fonts,
             };
             let picture = quickdraw::parse(&bytes, args.input.container, &options.limits)?;
-            let mut rendered = quickdraw::render(&picture, &options)?;
-            let encoded = match format {
-                Format::Png => quickdraw::encode_png(&rendered.image, args.dpi)?,
-                Format::Svg => {
-                    rendered.diagnostics.push(quickdraw::Diagnostic {
+            let (encoded, width, height, diagnostics) = if args.vector_policy
+                == VectorPolicy::Preserve
+            {
+                let vector = quickdraw::export_vector(
+                    &picture,
+                    &options,
+                    args.dpi,
+                    if format == Format::Pdf {
+                        quickdraw::VectorFormat::Pdf
+                    } else {
+                        quickdraw::VectorFormat::Svg
+                    },
+                )?;
+                (
+                    vector.bytes,
+                    vector.width,
+                    vector.height,
+                    vector.diagnostics,
+                )
+            } else {
+                let mut rendered = quickdraw::render(&picture, &options)?;
+                let encoded = match format {
+                    Format::Png => quickdraw::encode_png(&rendered.image, args.dpi)?,
+                    Format::Svg | Format::Pdf => {
+                        rendered.diagnostics.push(quickdraw::Diagnostic {
                         code: "raster_fallback",
-                        message: "Entire composited picture embedded as PNG; no editable vectors."
+                        message: "Entire composited picture embedded as an RGB image; no editable vectors."
                             .into(),
                         offset: None,
                     });
-                    quickdraw::encode_svg(&rendered.image, args.dpi)?
-                }
+                        if format == Format::Pdf {
+                            quickdraw::encode_pdf(&rendered.image, args.dpi)?
+                        } else {
+                            quickdraw::encode_svg(&rendered.image, args.dpi)?
+                        }
+                    }
+                };
+                (
+                    encoded,
+                    rendered.image.width(),
+                    rendered.image.height(),
+                    rendered.diagnostics,
+                )
             };
             // Recheck aliases immediately before committing; rename never follows a target symlink.
             output_path(&args.input.input, &args.output, args.overwrite)?;
+            for source in font_sources {
+                output_path(&source, &args.output, args.overwrite)?;
+            }
             write_output(&target, &encoded, args.overwrite)?;
             Ok(json!({
-                "protocol":1, "output":args.output, "format":if format == Format::Png {"png"} else {"svg"},
-                "width":rendered.image.width(), "height":rendered.image.height(), "dpi":args.dpi,
+                "protocol":1, "output":args.output, "format":match format { Format::Png => "png", Format::Svg => "svg", Format::Pdf => "pdf" },
+                "width":width, "height":height, "dpi":args.dpi,
                 "bytes":encoded.len(), "sha256":format!("{:x}", Sha256::digest(&encoded)),
                 "input_sha256":format!("{:x}", Sha256::digest(&bytes)),
-                "raster_profile":"portable_rgb_v1", "diagnostics":rendered.diagnostics
+                "raster_profile":if args.vector_policy == VectorPolicy::Preserve { Value::Null } else { json!("portable_rgb_v1") },
+                "vector_profile":if args.vector_policy == VectorPolicy::Preserve { json!("portable_paths_v1") } else { Value::Null },
+                "diagnostics":diagnostics
             }))
         }
     }

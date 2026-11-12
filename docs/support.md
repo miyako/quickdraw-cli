@@ -16,7 +16,7 @@ emits an operation-offset warning for every accepted approximation.
 | Raw PICT and 512-byte-header PICT files | Supported, explicit or unambiguous auto-detection |
 | Rectangular and transition-encoded regions (`01`, `80`-`84`) | Clipping, paint, fill, erase, invert; strict rectangular frames; complex frames approximate |
 | Background/pen/fill 8x8 patterns (`02`, `09`, `0A`) | Supported, distinct state |
-| Pen size/mode (`07`, `08`) | Nonnegative rectangular pens; pattern modes 8-15 only |
+| Pen size/mode (`07`, `08`) | Nonnegative rectangular pens; Boolean, arithmetic and highlight modes below |
 | Foreground/background (`0E`, `0F`, `1A`, `1B`) | Eight classic color constants and 16-bit RGB components reduced to high 8 bits |
 | Lines (`20`-`23`) | Integer pen, signed short deltas; axis-aligned strict; diagonals approximate |
 | Rectangles (`30`-`34`, `38`-`3C`) | Frame, paint, erase, invert, fill; shared last-rectangle state |
@@ -29,19 +29,25 @@ emits an operation-offset warning for every accepted approximation.
 | Packing | Byte PackBits; word PackBits for RGB555; RGB32 unpacked, pad-dropped, planar component packing; 3/4 component layouts |
 | CopyBits modes 0-7 | Mono strict; non-copy color PixMaps require approximate mode |
 | v2 reserved opcodes with documented sizes | Retained/skipped with `reserved_opcode` diagnostics; unknown/v2-only opcodes in v1 fail |
-| Text state, font-name and glyph metadata | Retained opaquely; not used to draw or select fonts |
-| Text (`28`-`2B`) | Parsed for inspection, rendering always fails; no font substitution |
+| Text state and font-name metadata | Exact font ID/size/face selection; font names retained without system lookup; unsupported layout settings fail at text use |
+| Text (`28`-`2B`) | Explicit native-size one-bit NFNT/FONT bindings; srcOr/srcBic; integer metrics and spacing; deltas from previous text start; advances graphics pen |
 | Printer comments (`A0`, `A1`) | Raw bytes and kind retained; strict fails; approximate warns that comment semantics are ignored |
-| Origin (`0C`), highlight (`1C`) | Parsed, rendering fails |
-| Rounded rectangles and arcs (`40` family, `60` family) | Parsed, rendering fails |
-| Pixel patterns (`12`-`14`) | Layout not implemented; parsing fails explicitly |
-| Arithmetic modes, dithering, mask/transparent modes | Unsupported; never silently mapped to copy |
+| Origin (`0C`) | Horizontal/vertical delta; local clip/pen/last-shape state preserved; prior pixels do not move |
+| Oval size / rounded rectangles (`0B`, `40` family) | Approximate elliptical corners, clamped diameters, inset framing |
+| Arcs (`60` family) | Approximate elliptical sectors; zero at 12 o'clock, positive clockwise; signed sweeps; frame excludes radii |
+| Pixel patterns (`12`-`14`) | Bit, solid RGB and indexed color tiles; bounded shared PixMap decoding; color patterns copy directly without pen-mode/fg/bg mapping |
+| OpColor / arithmetic modes (`1F`, modes 32-39) | Component blend, pin/wrap add/subtract, transparency, max/min; blend and pin modes require explicit OpColor |
+| Highlight (`1C`-`1E`, modes 50/52/58/60) | Exchanges background/highlight colors, leaves other destination colors intact; one-shot HiliteMode; explicit HiliteColor or CLI highlight required |
+| Transparent pattern mode 44 | Whole-pixel background keying |
+| Dithering / other extended modes | Unsupported; never silently mapped to copy |
 | QuickTime (`8200`, `8201`) | Length/payload retained; codec rendering fails |
 | Unknown opcodes / unknown length layouts | Fail with offset and opcode; no recovery by guessing |
 | Resource forks, MacBinary, AppleDouble | Unsupported containers; extract a single PICT resource first |
 | PNG | Opaque RGB output |
-| SVG | Opt-in whole-picture embedded PNG, never claimed editable vectors |
-| PDF / native vector / screen emulation | Not implemented |
+| SVG / PDF | Explicit whole-picture raster or supported genuine-path policy; PDF 1.4 single page |
+| Native vector subset | Uniform copy shapes/regions, axis-aligned lines and NFNT runs; tiled patterns, destination modes, bitmap instructions and diagonal/polygon/arc/complex-region frames require explicit whole-picture raster |
+| Outline/scaled/fractional/multibyte text, optional NFNT tables | Unsupported; no silent substitution |
+| Classic screen emulation | Not implemented |
 
 ## Raster profile `portable_rgb_v1`
 
@@ -49,7 +55,9 @@ The framebuffer has picFrame dimensions. Rectangles use half-open pixel ranges:
 left/top inclusive, right/bottom exclusive. Rectangular outlines lie inside the
 bounds; pen width and height control the inset independently. Zero pen dimension
 suppresses framing and lines but not painting/filling. Clip state is replaced by
-each Clip opcode and intersected with the fixed picture frame at drawing time.
+each Clip opcode and intersected with the current local-coordinate picture frame
+at drawing time. Origin deltas move that frame while retaining local clip, pen
+and remembered shape coordinates; existing framebuffer contents stay fixed.
 Regions XOR horizontal transition spans into active scanlines, preserving holes,
 disconnected areas and negative coordinates. Malformed transition ordering,
 out-of-bounds coordinates, odd counts and unclosed regions fail.
@@ -61,13 +69,24 @@ and background state (initially black and white). Paint/frame use the pen patter
 and mode; fill uses FillPat with copy; erase uses BkPat with copy; invert complements
 the existing framebuffer, independent of pen settings.
 
-Boolean modes use logical ink (one = black), mapped to RGB (zero = black), with
-per-channel arithmetic. For source ink `s` and destination ink `d`, modes 0-7 are
+Monochrome Boolean modes use logical ink (one = black), mapped to RGB (zero = black).
+For source ink `s` and destination ink `d`, modes 0-7 are
 copy `s`, or `s|d`, xor `s^d`, bic `(~s)&d`, not-copy `~s`, not-or `(~s)|d`,
 not-xor `(~s)^d`, not-bic `s&d`. Pattern modes 8-15 use the same truth tables.
-This is not an emulation of every Color QuickDraw indexed device, palette or
-color-matching rule. Non-copy color PixMaps are explicitly approximate; colored
-patterns use the declared RGB profile, not a historical device oracle.
+RGB copy mixes foreground/background by the source channel intensity. RGB XOR
+inverts destination for black source pixels (white for not-XOR), leaving colored
+source pixels alone; it does not claim a historical indexed-device palette rule.
+Non-copy color PixMaps are explicitly approximate.
+Color pixel patterns bypass foreground/background and mode, per Apple's
+Color QuickDraw description; the pattern sample is copied directly.
+
+Arithmetic works on raw 8-bit RGB source/destination components, without
+foreground/background tinting. Blend uses all 16 OpColor bits as the source
+weight. Pin limits use OpColor's high byte; wrapping add/subtract are modulo 256.
+Transparency compares the whole source pixel with the background color, not
+individual components. OpColor's initial value and the system highlight color
+are not invented. HiliteMode affects the next drawing operation, even an empty
+one, and is reset afterward; it is not consumed by intervening state changes.
 
 Lines use endpoint-inclusive integer Bresenham coverage, with the pen hanging
 below/right. All pen stamps in one line/polygon operation are unioned **before**
@@ -89,12 +108,20 @@ nothing. Negative-size geometric rectangles have empty coverage.
 ## Validation and provenance
 
 All fixtures in `tests/common`, `tests/core.rs`, `tests/bitmaps.rs` and
-`tests/cli.rs` are authored synthetically in this repository. No reference
+`tests/cli.rs`, `tests/semantics.rs`, `tests/fonts.rs`, `tests/vectors.rs` and
+`scripts/test_documents.py` are authored synthetically in this repository. No reference
 repository pictures or expected image files are copied. Tests cover both PICT
 versions, header containers/alignment, lengths and truncation, mutation sweeps,
 limits, PackBits byte/word boundaries, indexed/direct pixels, clipped patterns,
 region holes, overlapping XOR, source/destination scaling, deterministic PNG,
 and process-level JSON/error/output safety.
+Additional tests cover origin/clip/pen interaction, rounded corners, arc
+direction/radial exclusion, pixel tiles, arithmetic and highlight behavior,
+NFNT offsets/metrics/truncation, explicit mapping and source protection,
+text-start versus advanced pen coordinates, genuine paths and vector rejection.
+pypdf independently checks generated PDF xrefs, page dimensions, content streams
+and complete-composite image bytes; the XML parser checks SVG structure/clipping.
+These are document interoperability checks, not a classic rendering oracle.
 
 The tests' truth tables and selected expected pixels establish the declared
 implementation profile, **not independent rendering fidelity**. The mutation
@@ -116,6 +143,18 @@ jobs is not evidence that Windows tests passed.
 * [Apple, PICT opcode and PixMap packing tables](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-461.html)
 * [Apple, QuickDraw image/pen/shape semantics](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-12.html)
 * [Apple, printer comments](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-465.html)
+* [Apple, SetOrigin semantics](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-40.html)
+* [Apple, FrameRoundRect](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-103.html)
+* [Apple, FrameArc](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-115.html)
+* [Apple, Color QuickDraw modes and pixel patterns](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-199.html)
+* [Apple, OpColor](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-230.html)
+* [Apple, NFNT structure/metrics](https://dev.os9.ca/techpubs/mac/Text/Text-250.html),
+  [flags](https://dev.os9.ca/techpubs/mac/Text/Text-251.html),
+  [extended offsets](https://dev.os9.ca/techpubs/mac/Text/Text-252.html)
+* [Apple, PICT font identities/text placement](https://dev.os9.ca/techpubs/mac/Text/Text-142.html),
+  [text transfer modes](https://dev.os9.ca/techpubs/mac/Text/Text-137.html)
+* FontForge `fontforge/macbinary.c` NFNT parser (read-only comparison):
+  corroborates the width table offset relative to byte 16; no implementation copied.
 * [QuickDrawViewer](https://github.com/wiesmann/QuickDrawViewer), Apache-2.0:
   region transition interpretation and scope comparison. Its Apple-framework
   printer-style renderer is not this project's cross-platform backend or oracle.
@@ -124,7 +163,9 @@ jobs is not evidence that Windows tests passed.
 
 This is a usable **subset foundation**, not a fully capable conversion backbone.
 The versioned CLI and assets allow future wrapper integration work, but broad
-wrapper readiness is blocked by text/fonts, embedded QuickTime codecs, missing
-state/shapes/modes and independent corpus/fidelity validation. A wrapper must not
+wrapper readiness remains limited by outline/scaled/multibyte font handling,
+embedded QuickTime codecs, remaining modes/containers, vector coverage and
+independent corpus/fidelity validation. Explicit bitmap fonts and supported
+vector paths are usable, not a claim of complete font or printer support. A wrapper must not
 hide those failures or discard success warnings. No wrapper component, release
 publication, code signing or notarization is included in this repository.

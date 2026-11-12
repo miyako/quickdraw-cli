@@ -22,7 +22,7 @@ quickdraw inspect --help
 `capabilities` returns formats, containers, supported and unsupported semantics,
 default limits and exit codes. Help is human-readable text on stdout, exit 0.
 All other commands use the JSON contract below. There is deliberately no inert
-`--json`, `--fonts`, `--pdf`, or pixel-perfect switch.
+`--json`, system-font-search, or pixel-perfect switch.
 
 ### Input options (inspect and convert)
 
@@ -32,7 +32,7 @@ All other commands use the JSON contract below. There is deliberately no inert
 | `--container auto\|raw\|file` | `auto` | `raw`: PICT starts at byte 0; `file`: skip 512 bytes; `auto`: probe version signatures at both offsets, reject ambiguity |
 | `--max-input-bytes N` | 67108864 | Maximum file bytes, checked before and during reading |
 | `--max-pixels N` | 16000000 | Maximum frame, bitmap, region, and output pixel count, individually |
-| `--max-decoded-bytes N` | 134217728 | Cumulative decoded/scratch allocation accounting per parsing/rendering phase |
+| `--max-decoded-bytes N` | 134217728 | Cumulative decoded/scratch allocation accounting per parsing/rendering/vector phase; also bounds aggregate loaded font bytes |
 | `--max-operations N` | 100000 | Maximum parsed operations (excluding header and EndPic) |
 | `--max-work N` | 100000000 | Parser input/decoding and renderer coverage work budgets, separately |
 
@@ -56,21 +56,27 @@ PICT v2 `picSize` is ignored, per the format documentation.
 | Argument | Default | Behavior |
 | --- | --- | --- |
 | `--output PATH` | required | Parent must already exist |
-| `--format png\|svg` | suffix | Explicit format overrides suffix; otherwise `.png` / `.svg`, case-insensitive |
+| `--format png\|svg\|pdf` | suffix | Explicit format overrides suffix; otherwise `.png` / `.svg` / `.pdf`, case-insensitive |
 | `--fidelity strict\|approximate` | `strict` | Strict rejects known approximations; approximate permits only the listed approximations, with warnings |
-| `--vector-policy reject\|raster` | `reject` | SVG needs `raster`; embeds the **complete composited image**, not editable vectors; invalid with PNG |
+| `--vector-policy reject\|preserve\|raster` | `reject` | SVG/PDF requires explicit `preserve` or `raster`; nondefault policies invalid with PNG. Preserve emits supported paths or fails; raster embeds the **complete composited image**, not editable vectors |
 | `--width N` | frame width | Positive final pixel width; if height absent, preserve aspect ratio, rounded to nearest integer |
 | `--height N` | frame height | Positive final pixel height; if width absent, preserve aspect ratio |
 | `--dpi NUMBER` | 72 | Finite, greater than zero and at most 100000; physical metadata only |
 | `--background RRGGBB` | `ffffff` | Opaque initial canvas RGB; six hex digits, no `#` prefix |
+| `--highlight RRGGBB` | unknown | Explicit system highlight color, used when no HiliteColor is in effect and after DefHilite; highlight use without either fails |
+| `--font-map PATH` | none | Schema-1 JSON binding exact source font ID/point size/face to extracted NFNT/FONT resources; no substitutions |
 | `--overwrite` | false | Allow atomic replacement of an unrelated regular output file |
 
-When both dimensions are supplied, resampling stretches to those dimensions.
+When both dimensions are supplied, output stretches to those dimensions.
 When one is supplied and the rounded other dimension is zero, conversion fails.
-Scaling is deterministic nearest-neighbor **after compositing**, not reinterpreted
-pen geometry. PICT header resolution is available in inspection but does not
+Raster scaling is deterministic nearest-neighbor **after compositing**, not
+reinterpreted pen geometry. Preserved vector paths scale continuously with the
+viewport, without first rasterizing. PICT header resolution is available in inspection but does not
 silently change output DPI or pixel dimensions. PNG stores rounded pixels per
 meter (minimum 1); SVG physical width/height are pixels divided by DPI in inches.
+PDF 1.4 uses a single page measured in points (72 per inch), bounded to 14400
+points per side. Nonfinite physical dimensions fail. Extremely small DPI may
+therefore fail SVG/PDF even though the DPI itself is positive and finite.
 Color is device-independent opaque 8-bit RGB in this implementation, not an ICC
 conversion of a historical display profile.
 
@@ -78,13 +84,55 @@ conversion of a historical display profile.
 There is no transparency option: destination-dependent Boolean drawing needs a
 defined destination.
 
-Source paths, hard-link aliases, symlink outputs, directories and other
+Source paths (including the font map and fonts), hard-link aliases, symlink outputs, directories and other
 nonregular outputs are protected even with `--overwrite`. Output is prepared in
 a temporary file in its destination directory, flushed, synced, then atomically
 committed. No-clobber commit rejects concurrent creation. Errors before commit
 leave an existing output untouched and clean the temporary file. Atomic rename
 is not a guarantee against storage/power failure or hostile concurrent parent
 directory replacement; use a directory controlled by the invoking user.
+
+### Explicit bitmap fonts
+
+```json
+{"schema":1,"fonts":[{"id":7,"size":12,"face":0,"path":"fonts/roman-12.nfnt"}]}
+```
+
+Paths are relative to the map's directory unless absolute. Unknown JSON fields,
+duplicate bindings and unsupported schema numbers fail. `face` defaults to zero;
+it is the recorded QuickDraw style byte. The user asserts that the supplied
+resource matches the recorded font identity, size and style; a bare NFNT cannot
+independently establish all that identity. FontName records remain inspection
+metadata and never trigger system lookup. Include every exact binding used.
+Initial recorded font ID/size are zero unless changed by picture opcodes; no
+host-specific default font or size is invented.
+
+Only extracted one-bit NFNT/FONT data with integer metrics is accepted. No
+resource-fork loader, outline font conversion, synthetic styling, rescaling,
+missing-glyph box or substitution is performed. Single-byte codes address glyphs
+directly; no Unicode decoding, Script Manager shaping or multibyte layout is
+implemented. Text supports srcOr/srcBic, native-size glyphs, integer space and
+nonspace additions. Scaling ratios, fractional spacing/positioning, nonzero
+line justification and outline/fractional-width preferences fail when text uses
+them. Each use reports `explicit_bitmap_font`. Input limits apply to the map and
+each resource; collection bytes and binding count are also bounded.
+
+### Preserved vector policy
+
+`preserve` emits genuine geometry in `portable_paths_v1`: uniform copy fills,
+rectangular frames and axis-aligned pens, approximate ellipse/rounded-rectangle
+paths, filled arc sectors/polygons, region runs, and supported NFNT glyph runs.
+Curves/polygons still require `--fidelity approximate`. Region and font paths
+preserve pixel-run edges; they are not smooth outline-font reconstruction or
+searchable PDF text. Overlapping glyph ink uses nonzero fill rather than XOR.
+
+Destination-dependent modes, tiled patterns, bitmap instructions, diagonal
+lines and polygon/arc/complex-region framing currently fail in this backend.
+Colored Boolean text also fails unless srcOr foreground is black or srcBic
+background is white. Choose `raster` explicitly to use the complete raster
+interpreter instead. There is no automatic mixed fallback and no transparent
+overlay that loses the preceding destination. Unsupported raster semantics
+still fail under the raster policy.
 
 ## JSON and exit codes
 
@@ -117,10 +165,13 @@ the wrapper must consider the process exit status as well as parsing JSON.
 The paths, sizes, hashes and dimensions above illustrate shape, not a fixture.
 `output` echoes the supplied path, not necessarily an absolute path.
 Hashes refer to the exact bytes read/written, independent of file timestamps.
+For preserved vectors `raster_profile` is null and `vector_profile` is
+`"portable_paths_v1"`; for raster output `vector_profile` is null.
 
 Diagnostics are structured warnings with `code`, `message`, and an optional
 absolute byte `offset`. Codes currently include `unverified_fidelity`,
-`approximation`, `reserved_opcode`, `resampled`, `raster_fallback` and
+`approximation`, `reserved_opcode`, `resampled`, `raster_fallback`,
+`explicit_bitmap_font`, `vector_presentation` and
 `unsupported_operation` (inspection). A conversion always includes
 `unverified_fidelity`; exit 0 is **not** an unqualified fidelity guarantee.
 Retain and display warnings rather than discarding them.
@@ -130,7 +181,7 @@ Retain and display warnings rather than discarding them.
   "protocol": 1,
   "error": {
     "code": "unsupported",
-    "message": "text is not implemented",
+    "message": "no explicit NFNT font binding for id=7, size=12, face=0",
     "offset": 40,
     "opcode": 40
   }
