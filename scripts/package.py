@@ -129,6 +129,10 @@ def package(binary, target, output):
         "docs/cli.md": (ROOT / "docs/cli.md").read_bytes(),
         "docs/support.md": (ROOT / "docs/support.md").read_bytes(),
         "docs/assets.md": (ROOT / "docs/assets.md").read_bytes(),
+        "docs/features.md": (ROOT / "docs/features.md").read_bytes(),
+        "docs/images/quickdraw-features.png": (ROOT / "docs/images/quickdraw-features.png").read_bytes(),
+        "docs/images/quickdraw-features.svg": (ROOT / "docs/images/quickdraw-features.svg").read_bytes(),
+        "docs/images/quickdraw-features.json": (ROOT / "docs/images/quickdraw-features.json").read_bytes(),
         "Cargo.lock": (ROOT / "Cargo.lock").read_bytes(),
     }
     files.update(notices(target))

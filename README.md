@@ -62,6 +62,7 @@ Every conversion reports fidelity diagnostics, even on success.
 
 | Document | Purpose |
 | --- | --- |
+| [Illustrated feature guide](docs/features.md) | Browser-renderable examples and every supported feature family |
 | [CLI contract](docs/cli.md) | Arguments, JSON protocol 1, diagnostics, exit codes, limits |
 | [Support and validation](docs/support.md) | Opcode/semantics matrix, approximations, evidence and gaps |
 | [Binary assets](docs/assets.md) | Native build matrix, archive layout, integrity and wrapper handoff |

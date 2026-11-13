@@ -1,5 +1,8 @@
 # Supported subset and fidelity evidence
 
+For a visual introduction, see the [illustrated feature guide](features.md).
+This document remains the exact opcode, operand and evidence inventory.
+
 ## Scope
 
 The decoder is original Rust code informed by published PICT structures. It is
