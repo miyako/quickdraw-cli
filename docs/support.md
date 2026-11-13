@@ -166,8 +166,9 @@ No further missing documented **device-independent PixMap pixel/packing family**
 was identified. More core regression/producer-bug work can proceed under the
 existing contract; no further rendering feature is asserted implementable from
 this inventory without the specific evidence or policy above. The known
-lineJustify/matte investigations were not reopened. Component acceptance,
-signed distribution and release publication remain separate, deferred gates.
+lineJustify/matte investigations were not reopened. Signed CLI distribution now
+follows the [release contract](assets.md#signed-release-procedure-and-universal-contract);
+it does not establish historical fidelity or component acceptance.
 
 ### Common still-image variant inventory
 
@@ -616,6 +617,6 @@ layout are concrete compatibility blockers **for files using them**; neither is
 silently approximated. Classic device/font equivalence needs identified lawful
 reference outputs and a representative corpus. Additional codecs, CID fonts,
 printer comments and color management are feature-scope choices, not automatic
-blockers for accepting the defined subset. Product acceptance, durable signed
-distribution and the component adapter remain separate coordinator/user gates;
-this milestone does not authorize a component or release.
+blockers for accepting the defined subset. Signed CLI releases follow the asset
+contract; publication does not establish missing historical fidelity or implement
+the separate component adapter.
