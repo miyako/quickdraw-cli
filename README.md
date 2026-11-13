@@ -24,6 +24,10 @@ resource limits; additional pages/frames and unsupported color profiles fail.
 Raw/Animation also support declared white-zero grayscale depths. Neutral image
 description hints are validated and retained; OpColor blending requires an
 explicit weight and whole-picture vector fallback.
+QuickTime OpColor transparency keying preserves image layers. An opt-in
+`--printer-comments apple-portable` profile supports bounded text rotation and
+fractional axis-aligned line widths, separately from default comment handling;
+it never executes PostScript or combines text with its fallback bitmap.
 Diagonal pens and polygon/arc/complex-region frames can export shared pixel-run paths.
 Explicit portable MacRoman text can use caller-supplied static TrueType or supported
 name-keyed CFF1 sfnt/TTC

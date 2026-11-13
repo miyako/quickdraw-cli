@@ -36,7 +36,7 @@ emits an operation-offset warning for every accepted approximation.
 | Text ratios/fractions (`06`, `10`, `15`, `16`, `2E`) | Positive independent ratios, signed Fixed SpExtra, PnLocHFrac, integer PICT ChExtra, explicit fractional-width selection; nonnative layout requires approximate policy |
 | NFNT optional tables | Bounded 8.8 glyph advances and top-row/image-height entries; no silently omitted ink |
 | Font-resource selection / FOND | Explicit NFNT/FONT IDs or exact intrinsic FOND associations; mandatory Roman family assertion; optional fractional family widths after NFNT precedence; explicit approximate within-run kerning policy |
-| Printer comments (`A0`, `A1`) | Raw bytes and kind retained; strict fails; approximate warns that comment semantics are ignored |
+| Printer comments (`A0`, `A1`) | Default unchanged: strict fails, approximate warns/ignores. Opt-in `apple-portable` supports bounded text rotation and multiplicative fractional axis-aligned line widths; never executes PostScript |
 | Origin (`0C`) | Horizontal/vertical delta; local clip/pen/last-shape state preserved; prior pixels do not move |
 | Oval size / rounded rectangles (`0B`, `40` family) | Approximate elliptical corners, clamped diameters, inset framing |
 | Arcs (`60` family) | Approximate elliptical sectors; zero at 12 o'clock, positive clockwise; signed sweeps; frame excludes radii |
@@ -84,7 +84,7 @@ modes, device states or historical edge rules are supported.
 | `70`-`74` polygons; `80`-`84` regions | All five verbs implemented; polygons/complex frames approximate |
 | `78`-`7C`, `88`-`8C` same polygon/region | Unsupported, not silently repeated; Apple itself labels these ten entries "Not yet implemented" |
 | `90`-`91`, `98`-`99`, `9A`-`9B` Bits/PackBits/DirectBits rectangle/region | Implemented constrained mono/indexed/direct PixMaps, packing and compositing described above |
-| `A0`-`A1` ShortComment/LongComment | Retained, not executed printer/PostScript semantics; strict rejects, approximate explicitly warns |
+| `A0`-`A1` ShortComment/LongComment | Retained; explicit printer subset for 150/151/154/182 and empty 190/191 synchronization. Other semantics rejected in printer profile; default behavior unchanged |
 | Other reserved ranges with documented byte lengths | Retained/skipped with diagnostics, not advertised as implemented drawing; `17`-`19` lack determined sizes and fail |
 | Later `8200` / `8201` QuickTime extensions | `8200` supported still profile below; `8201` retained but unsupported |
 
@@ -108,7 +108,7 @@ an isolated transparent overlay.
 | `tiff` | Classic II/MM, one IFD, strips, chunky top-left 8-bit gray/RGB/unassociated RGBA; none/PackBits/LZW/Deflate; predictor 1/2 | Multi-page/SubIFD/BigTIFF, tiles, palette TIFF, CMYK/Lab, other precision/layout/compression, associated alpha, ICC/color semantics and unknown tags |
 | `gif ` | One full-screen image, global/local palette, interlacing, transparent index, disposal 0/1 | Animation, partial frames, loop/application/plain-text extensions, user-input/disposal dependency, missing palette, non-square aspect |
 | `cvid` and other codec IDs | No decoder advertised | Unsupported; add only explicit still/layout contracts with bounded decoder evidence |
-| Shared image-description/placement | Base description/table, neutral progressive/square/full-centered hints, optional final zero terminator; source crop/mask, affine/alpha and recorded OpColor blend | Separate PICT matte, gamma/color-management/nonneutral or unknown extensions, perspective and other transfer modes (including image transparency key) |
+| Shared image-description/placement | Base description/table, neutral progressive/square/full-centered hints, optional final zero terminator; source crop/mask, affine/alpha, recorded OpColor blend and exact RGB8 transparency key | Separate PICT matte, gamma/color-management/nonneutral or unknown extensions, perspective and other transfer modes |
 
 This is a documented-format inventory, **not** a measured frequency ranking;
 no representative user corpus has been supplied. Work priorities are below.
@@ -312,6 +312,21 @@ ImageMagick and QuickDrawViewer are not used as authoritative fidelity oracles.
 Native CI results must be read from actual workflow runs; merely adding Windows
 jobs is not evidence that Windows tests passed.
 
+Printer/key cases use original PICT records and the existing lawful NFNT,
+TrueType and CFF fixtures. Tests distinguish RGB-triple OpColor key equality
+from channel blending and ordinary background keying, including low-byte
+quantization and ordered key changes. Rotation checks first-baseline and
+reanchored centers, fractional angles/offsets, axis flips, default-versus-printer
+selection, origin outside groups, ignored/restored clipping, and suppressed
+fallback bitmaps. Fractional-width tests exercise accumulated/inverse factors,
+PenSize independence, exact vector extents and bounded ratios. Malformed groups,
+unsupported layouts/comments and transformed-path budgets fail explicitly.
+PDFium and embedded SVG-image checks independently verify key masks, rotated
+TrueType/CFF geometry and full-composite XOR fallback. Fractional lines are
+also rendered at higher PDF resolution to confirm real fractional width, not
+integer pen rounding. Native raster remains pixel-center coverage; edge pixels
+and subpixel hairlines can differ from continuous vector presentation.
+
 ## References (format research, not copied implementation)
 
 * [Apple, picture version/header opcodes](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-459.html)
@@ -319,6 +334,17 @@ jobs is not evidence that Windows tests passed.
 * [Apple, PICT opcode and PixMap packing tables](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-461.html)
 * [Apple, QuickDraw image/pen/shape semantics](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-12.html)
 * [Apple, printer comments](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-465.html)
+  (Inside Macintosh: Imaging With QuickDraw, Appendix B; HTML dated 7 July 1996).
+  [Text rotation](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-469.html)
+  establishes signed clockwise integer/Fixed rotation, first-text center
+  anchoring, clipping/CopyBits suppression and bitmap fallback separation.
+  Its Fixed field declaration controls the ten-byte form, not the contradictory
+  `Byte` declaration in the appendix's constants listing.
+  [Fractional widths](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-471.html)
+  explicitly distinguishes multiplicative LaserWriter and replacement SC state.
+  [Synchronization](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-468.html)
+  establishes empty 190/191 flush pairs. No example implementation is copied.
+  These establish a limited opt-in interpretation, not device-equivalence evidence.
 * [Apple, resource file format](https://dev.os9.ca/techpubs/mac/MoreToolbox/MoreToolbox-99.html)
 * [MacBinary II specification](https://files.stairways.com/other/macbinaryii-standard-info.txt)
 * [RFC 1740, AppleSingle/AppleDouble layouts](https://www.rfc-editor.org/rfc/rfc1740.html)
@@ -465,21 +491,32 @@ fractional placement and whole-run compositing remain explicitly portable;
 historical chunk boundaries, cached font data, printer adjustments, global
 pattern phase and implicit system colors/fonts are not reconstructed.
 
-### Prioritized ordinary compatibility gaps after TIFF/GIF support
+### Prioritized ordinary compatibility gaps after key/printer support
 
 | Priority by documented scope (not guessed corpus frequency) | Next implementable work / boundary |
 | --- | --- |
-| 1. Remaining existing-record variants | QuickTime OpColor transparency key (36), non-square pixel/clean-aperture presentation under an explicit PICT mapping contract, and color-management/gamma handling. Neutral suffixes, explicit grayscale and image blend are now implemented |
+| 1. Remaining existing-record variants | Non-square pixel/clean-aperture presentation under an explicit PICT mapping contract, and color-management/gamma handling. Neutral suffixes, explicit grayscale, image blend and OpColor key (36) are implemented |
 | 2. Existing standard text operations | Nonzero Roman lineJustify is blocked on the specific replay evidence above, not on CFF or general historical accuracy. PreserveGlyph/extended text state and additional CFF profiles require their own documented supported semantics |
 | 3. Additional named still codecs / containers | TIFF/GIF single-image profiles are implemented; Cinepak and additional TIFF variants remain optional work. `8201` only after its specific PICT layout is established; native resource-fork access is deployment convenience |
-| 4. New policies rather than guessed defaults | Default/resource image palettes require explicit identification/provenance; printer comment execution needs a defined supported comment contract; color management/device behavior is separate |
+| 4. New policies rather than guessed defaults | Default/resource image palettes require explicit identification/provenance; printer support is the opt-in text/axis-line subset, not arbitrary comment execution; color management/device behavior is separate |
+
+The finite printer milestone covers 150/151/154 text groups with no alignment,
+unmasked ink-only text and exact supplied fonts, 182 multiplicative positive
+widths for axis-aligned lines, and empty 190/191 synchronization pairs.
+Remaining printer implementation variants are aligned/background/masked text,
+diagonal/shape-frame fractional pens, line/string accumulation, nontext
+suspend/resume and other comment families. Combined flip/rotation order and
+stored-center remapping under an in-group origin change are deliberately not
+inferred from the simple Appendix B examples; those require a declared mapping
+or discriminating producer/output evidence before expanding this profile.
+Arbitrary PostScript execution is not a future requirement of this converter.
 
 Temporal files cannot become self-contained stills without supplying their
 previous frames. The undefined same-poly/region entries are not a reason to
 invent QuickDraw behavior or block a decision about the existing supported set.
 Remaining **standard** behavior gaps are unchanged core-opcode families versus
 operand semantics: nonzero lineJustify/PreserveGlyph and extended text state;
-printer-comment execution; the appendix's unimplemented same-poly/region codes;
+printer-comment variants beyond the explicit subset; the appendix's unimplemented same-poly/region codes;
 restricted PixMap/transfer/dithering and implicit device-state combinations.
 Later QuickTime gaps are listed separately above, not counted as missing basic
 rectangle/line/text opcodes. Non-Roman shaping still requires a new explicit

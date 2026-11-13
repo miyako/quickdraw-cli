@@ -16,6 +16,63 @@ fn png_bytes(alpha: u8) -> Vec<u8> {
     }
     out
 }
+#[test]
+fn opcolor_transparency_key_is_exact_rgb_not_background_or_per_channel_blend() {
+    use quickdraw::{Fidelity, VectorFormat, export_vector};
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, 4, 1);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[18, 52, 86, 18, 52, 87, 18, 53, 86, 19, 52, 86])
+            .unwrap();
+    }
+    let mut matrix = identity_matrix();
+    matrix[6] = 2 * 65536;
+    matrix[7] = 65536;
+    let mut packet = quicktime(b"png ", 4, 1, &png, matrix, &[]);
+    packet[54..56].copy_from_slice(&36u16.to_be_bytes());
+    let mut p = Pict::new(2, 6, 2);
+    p.op(0x31, &rect(0, 0, 2, 6));
+    p.op(0x1b, &words(&[0x7777, 0x7777, 0x7777]));
+    p.op(0x0c, &words(&[1, 0]));
+    p.op(0x1f, &words(&[0x12ff, 0x3400, 0x5680]));
+    p.op(0x8200, &packet);
+    // OpColor is ordered state; the second image makes the formerly keyed pixel visible.
+    p.op(0x1f, &words(&[0, 0, 0]));
+    let mut second = packet.clone();
+    second[34..38].copy_from_slice(&0i32.to_be_bytes());
+    p.op(0x8200, &second);
+    let pic = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
+    let opts = RenderOptions {
+        fidelity: Fidelity::Approximate,
+        ..Default::default()
+    };
+    let image = render(&pic, &opts).unwrap().image;
+    assert_eq!(
+        &image.rgb()[18..36],
+        &[
+            0, 0, 0, 0, 0, 0, 18, 52, 87, 18, 53, 86, 19, 52, 86, 0, 0, 0
+        ]
+    );
+    assert_eq!(&image.rgb()[3..6], &[18, 52, 86]);
+    for format in [VectorFormat::Svg, VectorFormat::Pdf] {
+        assert!(export_vector(&pic, &opts, 72., format).is_ok());
+    }
+    let mut missing = Pict::new(2, 6, 2);
+    missing.op(0x8200, &packet);
+    let pic = parse(&missing.finish(), Container::Raw, &Limits::default()).unwrap();
+    assert_eq!(
+        render(&pic, &opts).unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    let mut alpha = quicktime(b"png ", 2, 1, &png_bytes(128), identity_matrix(), &[]);
+    alpha[54..56].copy_from_slice(&36u16.to_be_bytes());
+    assert_eq!(decode(&alpha).unwrap_err().code, ErrorCode::Unsupported);
+}
 fn decode(payload: &[u8]) -> quickdraw::Result<quickdraw::Rendered> {
     let mut p = Pict::new(2, 8, 4);
     p.op(0x8200, payload);

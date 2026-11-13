@@ -153,6 +153,13 @@ LZW and Deflate libraries and their license notices travel inside the same
 native assets; Pillow/libtiff remain fixture-generation/test dependencies only.
 Font profiles, protocol 1 and asset schema 1 are unchanged.
 
+Mode 36 image keying and `--printer-comments apple-portable` are additive.
+The default remains `ignore`; conversion JSON adds `printer_comments`, and
+capabilities describe the limited printer subset. Consumers must make printer
+interpretation an explicit choice, preserve its diagnostics, and never silently
+retry failed printer operations using the default interpretation. Native asset
+names, protocol 1, font profiles and asset schema 1 are unchanged.
+
 Archives use sorted members, a fixed 1980 timestamp, explicit Unix permissions,
 canonical JSON and stored (uncompressed) members. Identical binary, source/docs,
 dependency notices, and toolchain metadata produce **byte-identical archives**;

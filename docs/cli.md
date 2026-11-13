@@ -99,6 +99,7 @@ exist outside the selected payload. The original file is preserved.
 | `--output PATH` | required | Parent must already exist |
 | `--format png\|svg\|pdf` | suffix | Explicit format overrides suffix; otherwise `.png` / `.svg` / `.pdf`, case-insensitive |
 | `--fidelity strict\|approximate` | `strict` | Strict rejects known approximations; approximate permits only the listed approximations, with warnings |
+| `--printer-comments ignore\|apple-portable` | `ignore` | Opt-in documented printer subset below; requires approximate fidelity, never executes PostScript |
 | `--vector-policy reject\|preserve\|raster` | `reject` | SVG/PDF requires explicit `preserve` or `raster`; nondefault policies invalid with PNG. Preserve emits supported paths or fails; raster embeds the **complete composited image**, not editable vectors |
 | `--width N` | frame width | Positive final pixel width; if height absent, preserve aspect ratio, rounded to nearest integer |
 | `--height N` | frame height | Positive final pixel height; if width absent, preserve aspect ratio |
@@ -427,6 +428,69 @@ interpreter instead. There is no automatic mixed fallback and no transparent
 overlay that loses the preceding destination. Unsupported raster semantics
 still fail under the raster policy.
 
+### Explicit portable printer comments
+
+The default is unchanged: `ignore` with strict fidelity rejects comments;
+approximate fidelity preserves them in inspection and warns that their semantics
+are ignored. It does not apply printer alternatives. This is not a historical
+screen-emulation switch.
+
+`--printer-comments apple-portable --fidelity approximate` selects the following
+**printer interpretation**, not classic QuickDraw or a particular printer driver.
+Conversion JSON adds `printer_comments: "apple_portable"` (or `"ignore"`), and
+`portable_printer_comments` identifies the interpretation in diagnostics.
+All unsupported comments fail in this profile instead of being silently ignored.
+
+* `TextBegin` (150): exactly 6 bytes, or 10 with an appended 16.16 angle.
+  No alignment (`tJus=0`) and zero reserved bytes are required. The appended
+  Fixed angle takes precedence when present; the shorter form uses signed
+  integer degrees. Positive is clockwise, within -360..360 degrees.
+  Horizontal/vertical flips are supported only without nonzero rotation;
+  combined flip/rotation order is deliberately outside this profile.
+* `TextCenter` (154): exactly two signed Fixed offsets, y then x. Add these
+  to the first subsequent text operation's **unrotated baseline** and retain
+  that center across subsequent runs. A new TextCenter reanchors at the next
+  text operation. TextEnd (151, empty) ends the group. Nested, unmatched,
+  unterminated groups and text without TextCenter fail.
+* Inside that group, ordinary CopyBits bitmap records are suppressed and
+  QuickDraw clipping is ignored, as Appendix B requires for printer text.
+  The picture viewport still bounds output. Recorded clip state continues
+  to govern drawing after TextEnd. Origin before/after the group works;
+  changes inside it are rejected rather than guessing stored-center remapping.
+  Other nontext drawing, including embedded QuickTime images, is rejected:
+  automatic suspend/resume and re-centering are not implemented.
+* Exact supplied NFNT/FONT or portable Roman outline bindings remain required.
+  Layout/pen advancement occur before rotation and are not rotated themselves.
+  Bitmap ink becomes bounded rectangular contour runs; TrueType/CFF curves
+  remain curves. Accepted modes are unmasked black/white srcOr/srcXor/srcBic,
+  or transparent text (36). Background-filling/inverse/masked modes and
+  printer alignment, line accumulation, font substitution and justification
+  are not inferred. Destination-dependent text still requires whole-picture
+  raster policy for SVG/PDF.
+* `SetLineWidth` (182): exactly two positive signed 16-bit integers, numerator
+  then denominator. The profile chooses Appendix B's **multiplicative
+  PostScript LaserWriter rule**, not LaserWriter SC's replacement rule.
+  Start at 1 per picture; accumulate exact reduced ratios, independently of
+  PenSize and text groups. Apply the factor to both current pen dimensions
+  at drawing time. Inverse factors restore 1. Bounds are 1/65536..32768;
+  rational overflow is a resource error. Zero/negative ratios are unsupported.
+  Nonunit factors currently support axis-aligned lines only; shape frames
+  and diagonals fail. Lines retain the portable top-left rectangular pen
+  footprint, including the endpoint, with fractional extents rather than
+  rounded pen sizes. No device-specific stroke alignment is claimed.
+* An immediately adjacent, empty PostScriptBegin/PostScriptEnd (190/191)
+  pair is accepted as synchronization with no drawing effect in this ordered
+  interpreter. Nonempty blocks, executable PostScript comments, string/line
+  layout controls and other printer languages are unsupported.
+
+Raster uses native-frame pixel-center coverage before the existing final
+nearest-neighbor scaling. Preserved vector paths retain fractional geometry;
+thus a subpixel hairline can disappear from native raster yet remain visible
+in a high-resolution PDF. This is an explicit presentation difference, not
+rounded-away vector widths or a historical printer claim. Prefer preserved
+vectors for continuous hairline output. No fallback bitmap is combined with
+its printer text alternative.
+
 ### Embedded QuickTime still images
 
 Compressed QuickTime opcode `8200` supports `jpeg`, `png `, `raw `, `rle `,
@@ -555,6 +619,7 @@ This compatibility distinction is advertised, not a historical filter claim.
 | 257, premultiplied white | Remove the recorded white-background contribution, then composite against existing destination |
 | 258, premultiplied black | Add the existing destination contribution to the premultiplied source |
 | 32, blend | Per-channel source weight from explicit recorded OpColor; opaque images only |
+| 36, transparent | Skip a source pixel equal to the explicit OpColor RGB key; copy all other source RGB without tinting |
 | 260, straight alpha blend | Per-channel product of explicit OpColor weight and source alpha |
 
 All alpha modes require an explicit channel and `--fidelity approximate`.
@@ -576,8 +641,18 @@ integer-rounded once after summation. It does not prematurely reduce OpColor or
 the combined opacity to eight bits. Per-channel weights are independent. These
 are explicit portable quantization rules, not a claim about historical ICM rounding.
 Mode 32 rejects nonopaque alpha rather than discarding it; mode 260 requires
-an explicit straight alpha channel. Transparency-key mode 36 is still unsupported
-for QuickTime images; it is not confused with CopyBits background keying.
+an explicit straight alpha channel.
+
+Mode 36 also requires recorded OpColor and approximate fidelity, even when
+clipped away. Compare all three decoded RGB8 components exactly against the
+high bytes of OpColor; the low bytes do not introduce tolerances or alpha.
+Only an entire matching RGB triple is transparent. Nonmatching pixels copy
+unchanged over preceding content, independent of foreground/background colors.
+Nonopaque sources fail rather than guessing how alpha combines with keying.
+This is the explicit RGB8 profile, not a historical device-depth comparison.
+Ordinary CopyBits mode 36 continues to key against QuickDraw background color.
+Preserved SVG/PDF represents keyed pixels as transparent pixels on that image
+layer, sharing the same source mask, affine sampling, clip and origin rules.
 
 Preserved SVG/PDF shares the exact placement and source-mask sampler. Straight
 alpha becomes PNG alpha/PDF soft masks on just the image layer; other geometry

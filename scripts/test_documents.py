@@ -294,6 +294,94 @@ class Documents(unittest.TestCase):
                 self.assertEqual(result.returncode,5,result.stderr)
                 self.compare_pdf_with_raster(blend_ops,frame=(0,0,12,20),extra=("--fidelity","approximate"),policy="raster")
 
+    def test_quicktime_opcolor_key_preserves_masked_affine_layers(self):
+        source = Image.new("RGB", (4, 2))
+        source.putdata([(18,52,86),(19,52,86),(18,52,86),(18,52,87)] * 2)
+        encoded = io.BytesIO()
+        source.save(encoded, format="PNG")
+        mask = words(0,1,4,32767,2,1,4,32767,32767)
+        matrix = [2*65536,0,0,0,2*65536,0,3*65536,3*65536,1<<30]
+        ops = [(0x31,words(0,0,12,20)), (0x1b,words(0x7777,0x7777,0x7777)),
+               (0x0c,words(1,1)), (1,words(10,0,0,12,20)),
+               (0x1f,words(0x12ff,0x3480,0x5600)),
+               (0x8200,quicktime(b"png ",4,2,32,encoded.getvalue(),matrix,36,mask))]
+        extra = ("--fidelity","approximate")
+        self.compare_pdf_with_raster(ops, frame=(0,0,12,20), extra=extra)
+        result,target = self.convert("svg",operations=ops,frame=(0,0,12,20),extra=extra)
+        self.assertEqual(result.returncode,0,result.stderr)
+        import base64
+        node = ET.parse(target).find(".//{http://www.w3.org/2000/svg}image")
+        href = node.get("href") or node.get("{http://www.w3.org/1999/xlink}href")
+        with Image.open(io.BytesIO(base64.b64decode(href.split(",")[1]))) as placed:
+            self.assertEqual(placed.size,(8,4))
+            self.assertEqual(list(placed.convert("RGBA").getchannel("A").getdata()),
+                             [0,0,255,255,0,0,255,255] * 4)
+
+    def test_printer_rotation_cubic_paths_fallback_suppression_and_xor(self):
+        def comment(kind, data=b""):
+            return (0xa1,words(kind,len(data))+data)
+        frame = (0,0,64,64)
+        for filename,char in [("portable-outline.ttf",b"A"),("portable-outline-cff.otf",b"C")]:
+            extra = self.outline_map(filename) + ("--printer-comments","apple-portable")
+            setup = [(3,words(7)),(0x0d,words(10)),(0x15,words(0))]
+            text = (0x28,words(40,24)+b"\x01"+char)
+            plain = setup + [text]
+            result,target = self.convert("png",operations=plain,frame=frame,extra=extra)
+            self.assertEqual(result.returncode,0,result.stderr)
+            with Image.open(target) as image:
+                expected = image.convert("RGB").transpose(Image.Transpose.ROTATE_270)
+            fallback = words(2,0,0,1,1,0,0,1,1,48,48,50,50,0) + b"\x80\x00"
+            rotated = setup + [comment(190),comment(191),comment(150,words(0,90,0)),
+                               comment(154,struct.pack(">ii",-8*65536,8*65536)),
+                               (1,words(10,0,0,0,0)),text,(0x90,fallback),comment(151)]
+            result,target = self.convert("png",operations=rotated,frame=frame,extra=extra)
+            self.assertEqual(result.returncode,0,result.stderr)
+            with Image.open(target) as image:
+                self.assertEqual(image.convert("RGB").tobytes(),expected.tobytes())
+            result,target = self.convert("svg",operations=rotated,frame=frame,extra=extra)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertFalse(ET.parse(target).findall(".//{http://www.w3.org/2000/svg}image"))
+            self.assertIn("portable_printer_comments",[d["code"] for d in json.loads(result.stdout)["diagnostics"]])
+            if char == b"C":
+                self.assertIn(" C",target.read_text())
+            result,target = self.convert("pdf",operations=rotated,frame=frame,extra=extra)
+            self.assertEqual(result.returncode,0,result.stderr)
+            with closing(pdfium.PdfDocument(str(target))) as document, closing(document[0]) as page, \
+                 closing(page.render(scale=2,no_smoothpath=True)) as bitmap:
+                actual = bitmap.to_pil().convert("RGB")
+                for y in range(1,63):
+                    for x in range(1,63):
+                        colors = {expected.getpixel((x+dx,y+dy)) for dx in [-1,0,1] for dy in [-1,0,1]}
+                        if len(colors) == 1:
+                            self.assertEqual(actual.getpixel((x,y)),expected.getpixel((x,y)))
+            xor = [(0x31,words(*frame))] + setup + [(5,words(2)),comment(150,words(0,90,0)),
+                   comment(154,struct.pack(">ii",-8*65536,8*65536)),text,comment(151)]
+            result,_ = self.convert("pdf",operations=xor,frame=frame,extra=extra)
+            self.assertEqual(result.returncode,5)
+            self.compare_pdf_with_raster(xor,frame=frame,extra=extra,policy="raster")
+
+    def test_printer_fractional_width_geometry_and_state_are_not_integer_rounding(self):
+        def width(n,d):
+            return (0xa1,words(182,4,n,d))
+        extra = ("--fidelity","approximate","--printer-comments","apple-portable")
+        ops = [width(1,4),(7,words(8,8)),(0x0c,words(1,1)),(1,words(10,0,3,10,18)),
+               (0x20,words(2,1,2,15)),width(2,1),(7,words(4,4)),(0x20,words(6,1,6,15))]
+        self.compare_pdf_with_raster(ops,extra=extra)
+        fractional = [width(3,4),(0x20,words(2,1,2,10))]
+        result,target = self.convert("pdf",operations=fractional,extra=extra)
+        self.assertEqual(result.returncode,0,result.stderr)
+        paths = PdfReader(target,strict=True).pages[0].get_contents().operations
+        self.assertIn(([10.75,2.75],b"l"),paths)
+        with closing(pdfium.PdfDocument(str(target))) as document, closing(document[0]) as page, \
+             closing(page.render(scale=8,no_smoothpath=True)) as bitmap:
+            image = bitmap.to_pil().convert("RGB")
+            self.assertEqual([image.getpixel((20,y)) for y in range(7,12)],
+                             [(255,255,255),(0,0,0),(0,0,0),(0,0,0),(255,255,255)])
+        xor = [width(3,4),(8,words(10)),(0x20,words(2,1,2,10))]
+        result,_ = self.convert("svg",operations=xor,extra=extra)
+        self.assertEqual(result.returncode,5)
+        self.compare_pdf_with_raster(xor,extra=extra,policy="raster")
+
     def convert(self, extension, policy="preserve", operations=None, extra=(), frame=(0,0,10,20)):
         source, target = self.root / "input.pict", self.root / f"output.{extension}"
         source.write_bytes(picture(operations or [(0x31, words(0, 0, 10, 20))], frame))

@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::raster::{State, copy_color, layout_text, line_points, output_size, text_policy};
+use crate::raster::{State, copy_color, line_points, output_size, prepare_text, text_policy};
 use crate::{RenderOptions, output};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::fmt::Write;
@@ -27,6 +27,17 @@ enum Segment {
 #[derive(Default)]
 struct Path(Vec<Segment>, bool);
 impl Path {
+    fn fractional_rect(&mut self, r: [f64; 4], budget: &mut Budget<'_>) -> Result<()> {
+        crate::printer::bounds(r)?;
+        if r[0] >= r[2] || r[1] >= r[3] {
+            return Ok(());
+        }
+        self.add(Segment::Move(r[0], r[1]), budget)?;
+        self.add(Segment::Line(r[2], r[1]), budget)?;
+        self.add(Segment::Line(r[2], r[3]), budget)?;
+        self.add(Segment::Line(r[0], r[3]), budget)?;
+        self.add(Segment::Close, budget)
+    }
     fn coverage(&mut self, frame: Rect, mask: &[u8], budget: &mut Budget<'_>) -> Result<()> {
         budget.work(mask.len() as u64)?;
         for (row, bytes) in mask.chunks_exact(frame.width()).enumerate() {
@@ -357,6 +368,7 @@ pub fn export_vector(
         pdf,
         &mut budget,
     )?;
+    crate::printer::policy(options, &mut diagnostics)?;
     let mut outline_clip_id = picture.operations.len() + 1;
     for (index, op) in picture.operations.iter().enumerate() {
         let result = (|| {
@@ -459,7 +471,11 @@ pub fn export_vector(
                     rgb = color(&state, Verb::Frame)?;
                     let (from, to) = line_points(&op.command, &state)?;
                     state.pen_location = to;
-                    if from.x != to.x && from.y != to.y {
+                    if let Some(rect) = state.printer.line(from, to, state.pen)? {
+                        if state.pen.x != 0 && state.pen.y != 0 {
+                            path.fractional_rect(rect, &mut budget)?;
+                        }
+                    } else if from.x != to.x && from.y != to.y {
                         if options.fidelity == Fidelity::Strict {
                             return Err(unsupported(
                                 "diagonal vector pen coverage requires --fidelity approximate",
@@ -497,7 +513,7 @@ pub fn export_vector(
                 }
                 Command::Text { .. } => {
                     text_policy(&state, options, &mut diagnostics, op.offset)?;
-                    let run = layout_text(&mut state, &op.command, options, &mut budget)?;
+                    let run = prepare_text(&mut state, &op.command, options, &mut budget)?;
                     let mut colors = match state.text.base_mode() {
                         0 => [Some(state.foreground), Some(state.background)],
                         4 => [Some(state.background), Some(state.foreground)],
@@ -534,7 +550,7 @@ pub fn export_vector(
                             area.right = area.right.min(outline.advance_right);
                         }
                         let mut outline_clip = Path::default();
-                        if let Some(region) = state.clip {
+                        if let Some(region) = state.clip() {
                             // Clip intersections are emitted as bounded row rectangles,
                             // while glyph geometry remains continuous outline curves.
                             budget.work((area.width() * area.height()) as u64)?;
@@ -640,7 +656,7 @@ pub fn export_vector(
                         for y in mask.bounds.top..mask.bounds.bottom {
                             let covered = |x| {
                                 mask.ink(x, y) == (plane == 0)
-                                    && state.clip.is_none_or(|clip| clip.contains(x, y))
+                                    && state.clip().is_none_or(|clip| clip.contains(x, y))
                             };
                             let mut x = mask.bounds.left;
                             while x < mask.bounds.right {
@@ -746,7 +762,7 @@ pub fn export_vector(
                 _ => unreachable!("state command"),
             }
             let mut clip = Path::default();
-            if let Some(region) = state.clip {
+            if let Some(region) = state.clip() {
                 clip.region(region, &mut budget)?;
             }
             let viewport = picture.frame.translated(state.origin)?;
@@ -756,7 +772,7 @@ pub fn export_vector(
                 emit(
                     &mut content,
                     &path,
-                    state.clip.map(|_| &clip),
+                    state.clip().map(|_| &clip),
                     rgb,
                     delta,
                     index + 1,
@@ -768,7 +784,7 @@ pub fn export_vector(
                     &mut content,
                     &mut resources,
                     &path,
-                    state.clip.map(|_| &clip),
+                    state.clip().map(|_| &clip),
                     state.drawing(pattern_verb).0,
                     state.drawing(pattern_verb).1,
                     &state,
@@ -795,6 +811,7 @@ pub fn export_vector(
     } else {
         content.into_bytes()
     };
+    state.printer.finish()?;
     Ok(VectorOutput {
         bytes,
         width: width as u32,
@@ -966,7 +983,7 @@ fn emit_bitmap(
 ) -> Result<()> {
     let viewport = frame.translated(state.origin)?;
     let mut area = bitmap.destination.intersect(viewport);
-    if let Some(clip) = state.clip {
+    if let Some(clip) = state.clip() {
         area = area.intersect(clip.bounds);
     }
     if area.width() == 0 || area.height() == 0 {
@@ -984,12 +1001,12 @@ fn emit_bitmap(
     let mut alpha = vec![0; count];
     for y in area.top..area.bottom {
         for x in area.left..area.right {
-            if state.clip.is_some_and(|c| !c.contains(x, y)) {
+            if state.clip().is_some_and(|c| !c.contains(x, y)) {
                 continue;
             }
             if let Some((source, opacity)) = bitmap.sample(x, y) {
                 let i = (y - area.top) as usize * area.width() + (x - area.left) as usize;
-                if bitmap.mode == 36 && source == state.background {
+                if crate::raster::transparent_pixel(bitmap, source, state) {
                     continue;
                 }
                 let rgb = if bitmap.raw_copy || bitmap.mode == 36 {

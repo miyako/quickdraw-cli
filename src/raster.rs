@@ -3,6 +3,7 @@ use crate::model::*;
 #[derive(Clone, Debug)]
 pub struct RenderOptions {
     pub fidelity: Fidelity,
+    pub printer_comments: crate::PrinterComments,
     pub background: [u8; 3],
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -14,6 +15,7 @@ impl Default for RenderOptions {
     fn default() -> Self {
         Self {
             fidelity: Fidelity::Strict,
+            printer_comments: crate::PrinterComments::Ignore,
             background: [255; 3],
             width: None,
             height: None,
@@ -48,6 +50,7 @@ pub struct Rendered {
 }
 
 pub(crate) struct State<'a> {
+    pub printer: crate::printer::PrinterState,
     pub clip: Option<&'a Region>,
     pub foreground: [u8; 3],
     pub background: [u8; 3],
@@ -68,6 +71,7 @@ pub(crate) struct State<'a> {
 impl Default for State<'_> {
     fn default() -> Self {
         Self {
+            printer: Default::default(),
             clip: None,
             foreground: [0; 3],
             background: [255; 3],
@@ -89,6 +93,11 @@ impl Default for State<'_> {
 }
 impl<'a> State<'a> {
     pub fn update(&mut self, command: &'a Command, options: &RenderOptions) -> Result<bool> {
+        if options.printer_comments == crate::PrinterComments::ApplePortable
+            && self.printer.intercept(command)?
+        {
+            return Ok(true);
+        }
         match command {
             Command::Nop | Command::Metadata(_) => {}
             Command::Clip(region) => self.clip = Some(region),
@@ -117,6 +126,13 @@ impl<'a> State<'a> {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+    pub fn clip(&self) -> Option<&'a Region> {
+        if self.printer.rotating() {
+            None
+        } else {
+            self.clip
+        }
     }
     pub fn drawing(&self, verb: Verb) -> (&Pattern, u16) {
         match verb {
@@ -153,7 +169,7 @@ struct Canvas {
 }
 impl Canvas {
     fn composite(&mut self, x: i32, y: i32, rgb: [u8; 3], alpha: u8, mode: u16, state: &State<'_>) {
-        if !self.frame.contains(x, y) || state.clip.is_some_and(|c| !c.contains(x, y)) {
+        if !self.frame.contains(x, y) || state.clip().is_some_and(|c| !c.contains(x, y)) {
             return;
         }
         let index = ((y - self.frame.top) as usize * self.frame.width()
@@ -185,7 +201,7 @@ impl Canvas {
         }
     }
     fn store(&mut self, x: i32, y: i32, rgb: [u8; 3], state: &State<'_>) {
-        if self.frame.contains(x, y) && state.clip.is_none_or(|c| c.contains(x, y)) {
+        if self.frame.contains(x, y) && state.clip().is_none_or(|c| c.contains(x, y)) {
             let i = ((y - self.frame.top) as usize * self.frame.width()
                 + (x - self.frame.left) as usize)
                 * 3;
@@ -193,7 +209,7 @@ impl Canvas {
         }
     }
     fn apply(&mut self, x: i32, y: i32, source: [u8; 3], mode: u16, state: &State<'_>) {
-        if !self.frame.contains(x, y) || state.clip.is_some_and(|clip| !clip.contains(x, y)) {
+        if !self.frame.contains(x, y) || state.clip().is_some_and(|clip| !clip.contains(x, y)) {
             return;
         }
         let index = ((y - self.frame.top) as usize * self.frame.width()
@@ -242,7 +258,7 @@ impl Canvas {
         let color = pattern.sample(x - state.origin.x, y - state.origin.y);
         if matches!(pattern, Pattern::Bits(_)) {
             self.apply(x, y, color, mode, state);
-        } else if self.frame.contains(x, y) && state.clip.is_none_or(|clip| clip.contains(x, y)) {
+        } else if self.frame.contains(x, y) && state.clip().is_none_or(|clip| clip.contains(x, y)) {
             let i = ((y - self.frame.top) as usize * self.frame.width()
                 + (x - self.frame.left) as usize)
                 * 3;
@@ -359,6 +375,7 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
         "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity.",
         None,
     )];
+    crate::printer::policy(options, &mut diagnostics)?;
     for op in &picture.operations {
         let result = (|| {
             budget.work(1)?;
@@ -407,7 +424,7 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                 }
                 Command::Text { .. } => {
                     text_policy(&state, options, &mut diagnostics, op.offset)?;
-                    let run = layout_text(&mut state, &op.command, options, &mut budget)?;
+                    let run = prepare_text(&mut state, &op.command, options, &mut budget)?;
                     let mode = state.text.base_mode();
                     state.validate(mode, false)?;
                     let mask = run.mask(canvas.frame, state.text.masked(), &mut budget)?;
@@ -485,6 +502,7 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
             e.opcode(op.opcode)
         })?;
     }
+    state.printer.finish()?;
     let rgb = if (out_width, out_height) == (frame.width(), frame.height()) {
         canvas.rgb
     } else {
@@ -693,7 +711,107 @@ pub(crate) fn font_diagnostic(
     )
 }
 
-pub(crate) fn layout_text<'a>(
+pub(crate) fn prepare_text<'a>(
+    state: &mut State<'_>,
+    command: &Command,
+    options: &'a RenderOptions,
+    budget: &mut Budget<'_>,
+) -> Result<TextRun<'a>> {
+    let mut run = layout_text(state, command, options, budget)?;
+    let Some(transform) = state.printer.transform(state.text_start)? else {
+        return Ok(run);
+    };
+    if state.text.masked()
+        || !matches!(state.text.base_mode(), 1 | 2 | 3 | 36)
+        || (state.text.base_mode() != 36
+            && (state.foreground != [0; 3] || state.background != [255; 3]))
+    {
+        return Err(Error::new(
+            ErrorCode::Unsupported,
+            "rotated printer text requires unmasked black/white srcOr/srcXor/srcBic or transparent text; opaque/background and masked-run geometry are outside this profile",
+        ));
+    }
+    use crate::outline::{OutlineRun, OutlineSegment as S};
+    let mut outline = if let Some(outline) = run.outline.take() {
+        outline
+    } else {
+        let mask = run.mask(run.bounds, false, budget)?;
+        let mut segments = Vec::new();
+        budget.work(mask.ink.len() as u64)?;
+        for y in mask.bounds.top..mask.bounds.bottom {
+            let mut x = mask.bounds.left;
+            while x < mask.bounds.right {
+                if !mask.ink(x, y) {
+                    x += 1;
+                    continue;
+                }
+                let start = x;
+                while x < mask.bounds.right && mask.ink(x, y) {
+                    x += 1;
+                }
+                if segments.len() + 5 > budget.limits.max_operations {
+                    return Err(Error::new(
+                        ErrorCode::ResourceLimit,
+                        "rotated bitmap text path limit exceeded",
+                    ));
+                }
+                budget.allocate(5 * std::mem::size_of::<S>())?;
+                segments.extend([
+                    S::Move([f64::from(start), f64::from(y)]),
+                    S::Line([f64::from(x), f64::from(y)]),
+                    S::Line([f64::from(x), f64::from(y) + 1.0]),
+                    S::Line([f64::from(start), f64::from(y) + 1.0]),
+                    S::Close,
+                ]);
+            }
+        }
+        OutlineRun {
+            glyphs: vec![segments],
+            bounds: run.bounds,
+            advance_right: run.advance_right,
+        }
+    };
+    let r = outline.bounds;
+    let corners = [
+        [f64::from(r.left), f64::from(r.top)],
+        [f64::from(r.right), f64::from(r.top)],
+        [f64::from(r.right), f64::from(r.bottom)],
+        [f64::from(r.left), f64::from(r.bottom)],
+    ]
+    .map(|p| transform.point(p));
+    let mut bounds = [
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for p in corners {
+        bounds[0] = bounds[0].min(p[0]);
+        bounds[1] = bounds[1].min(p[1]);
+        bounds[2] = bounds[2].max(p[0]);
+        bounds[3] = bounds[3].max(p[1]);
+    }
+    outline.bounds = crate::printer::bounds(bounds)?;
+    budget
+        .limits
+        .pixels(outline.bounds.width(), outline.bounds.height())?;
+    outline.advance_right = outline.bounds.right;
+    for glyph in &mut outline.glyphs {
+        for segment in glyph {
+            budget.work(1)?;
+            match segment {
+                S::Move(p) | S::Line(p) => *p = transform.point(*p),
+                S::Quad(points) => points.iter_mut().for_each(|p| *p = transform.point(*p)),
+                S::Curve(points) => points.iter_mut().for_each(|p| *p = transform.point(*p)),
+                S::Close => {}
+            }
+        }
+    }
+    run.outline = Some(outline);
+    Ok(run)
+}
+
+fn layout_text<'a>(
     state: &mut State<'_>,
     command: &Command,
     options: &'a RenderOptions,
@@ -1154,6 +1272,22 @@ fn line(
     if state.pen.x == 0 || state.pen.y == 0 {
         return Ok(());
     }
+    if let Some(rect) = state.printer.line(from, to, state.pen)? {
+        let area = crate::printer::bounds(rect)?.intersect(canvas.frame);
+        budget.work((area.width() * area.height()) as u64)?;
+        for y in area.top..area.bottom {
+            for x in area.left..area.right {
+                if f64::from(x) + 0.5 >= rect[0]
+                    && f64::from(x) + 0.5 < rect[2]
+                    && f64::from(y) + 0.5 >= rect[1]
+                    && f64::from(y) + 0.5 < rect[3]
+                {
+                    canvas.patterned(x, y, Verb::Paint, state);
+                }
+            }
+        }
+        return Ok(());
+    }
     let mask = line_coverage(canvas.frame, from, to, state.pen, budget)?;
     apply_mask(canvas, &mask, state, budget)
 }
@@ -1165,10 +1299,10 @@ pub(crate) fn image_policy(
     diagnostics: &mut Vec<Diagnostic>,
     offset: usize,
 ) -> Result<()> {
-    if matches!(bitmap.mode, 32 | 260) && state.op_color.is_none() {
+    if matches!(bitmap.mode, 32 | 36 | 260) && state.op_color.is_none() {
         return Err(Error::new(
             ErrorCode::Unsupported,
-            "QuickTime image blend requires explicit OpColor",
+            "QuickTime image blend/transparency key requires explicit OpColor",
         ));
     }
     diagnostics.push(Diagnostic::new("embedded_still_image",
@@ -1187,6 +1321,19 @@ pub(crate) fn image_policy(
     Ok(())
 }
 
+pub(crate) fn transparent_pixel(bitmap: &Bitmap, source: [u8; 3], state: &State<'_>) -> bool {
+    bitmap.mode == 36
+        && source
+            == if bitmap.raw_copy {
+                state
+                    .op_color
+                    .expect("validated image OpColor")
+                    .map(|v| (v >> 8) as u8)
+            } else {
+                state.background
+            }
+}
+
 fn blit(
     canvas: &mut Canvas,
     bitmap: &Bitmap,
@@ -1202,8 +1349,11 @@ fn blit(
     for y in area.top..area.bottom {
         for x in area.left..area.right {
             if let Some((color, alpha)) = bitmap.sample(x, y) {
+                if transparent_pixel(bitmap, color, state) {
+                    continue;
+                }
                 if bitmap.raw_copy {
-                    if bitmap.mode == 0 {
+                    if matches!(bitmap.mode, 0 | 36) {
                         canvas.store(x, y, color, state);
                     } else {
                         canvas.composite(x, y, color, alpha, bitmap.mode, state);

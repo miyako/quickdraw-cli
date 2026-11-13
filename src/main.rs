@@ -124,6 +124,9 @@ struct Convert {
     /// Strict rejects known approximate geometry/comments; neither mode is an emulator.
     #[arg(long, value_enum, default_value = "strict")]
     fidelity: Fidelity,
+    /// Explicit printer interpretation, separate from the default ignored-comment profile.
+    #[arg(long, value_enum, default_value = "ignore")]
+    printer_comments: quickdraw::PrinterComments,
     /// SVG/PDF: preserve genuine paths or rasterize the complete composited image.
     #[arg(long, value_enum, default_value = "reject")]
     vector_policy: VectorPolicy,
@@ -418,11 +421,23 @@ fn capabilities() -> Value {
         "quicktime_rpza_depths": [16,24],
         "quicktime_smc_palette": "depth_8_embedded_id_0_sequential_flags_0x8000_no_default_or_resource_lookup",
         "quicktime_block_frames": "self_contained_only_no_skips_no_uninitialized_caches",
-        "quicktime_modes": [0,32,256,257,258,260],
+        "quicktime_modes": [0,32,36,256,257,258,260],
+        "quicktime_transparency_key": "mode_36_exact_rgb8_equality_to_explicit_opcolor_high_bytes_opaque_sources",
         "quicktime_opcolor_blend": "explicit_opcolor_approximate_whole_picture_vector_fallback",
         "quicktime_affine": "nonsingular_16_16_pixel_center_inverse_with_integral_axis_legacy_sampling",
         "quicktime_alpha_vector": "straight_alpha_only_premultiplied_requires_whole_picture_raster",
         "quicktime_separate_matte": false,
+        "printer_comments": {
+            "default":"ignore",
+            "opt_in":"apple-portable",
+            "requires_fidelity":"approximate",
+            "text_begin_end_center":[150,151,154],
+            "text_rotation":"no_alignment_unmasked_ink_only_exact_fonts_fixed_or_integer_angle",
+            "text_fallback":"suppress_copybits_and_ignore_clip_inside_group",
+            "width":"comment_182_multiplicative_positive_ratio_axis_aligned_lines_only",
+            "synchronization":"empty_190_191_pair_only",
+            "postscript_execution":false
+        },
         "pict_versions": [1, 2],
         "raster_profile": "portable_rgb_v1",
         "fidelity": {
@@ -563,6 +578,7 @@ fn execute(cli: Cli) -> Result<Value> {
             )?;
             let options = RenderOptions {
                 fidelity: args.fidelity,
+                printer_comments: args.printer_comments,
                 background: args.background,
                 width: args.width,
                 height: args.height,
@@ -635,6 +651,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 "raster_profile":if args.vector_policy == VectorPolicy::Preserve { Value::Null } else { json!("portable_rgb_v1") },
                 "vector_profile":if args.vector_policy == VectorPolicy::Preserve { json!("portable_paths_v1") } else { Value::Null },
                 "outline_profile":if diagnostics.iter().any(|d|d.code=="explicit_outline_font") { json!("portable_outline_v1") } else { Value::Null },
+                "printer_comments":args.printer_comments,
                 "diagnostics":diagnostics
             }))
         }

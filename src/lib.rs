@@ -10,6 +10,7 @@ mod model;
 mod outline;
 mod output;
 mod parser;
+mod printer;
 mod raster;
 mod vector;
 
@@ -27,5 +28,6 @@ pub use model::{
 pub use outline::{OutlineEncoding, OutlineFont, OutlineSelection};
 pub use output::{encode_pdf, encode_png, encode_svg};
 pub use parser::parse;
+pub use printer::PrinterComments;
 pub use raster::{Image, RenderOptions, Rendered, render};
 pub use vector::{VectorFormat, VectorOutput, export_vector};

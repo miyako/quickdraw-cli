@@ -662,7 +662,7 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
         ));
     }
     let mode = q.u16()?;
-    if !matches!(mode, 0 | 32 | 256 | 257 | 258 | 260) {
+    if !matches!(mode, 0 | 32 | 36 | 256 | 257 | 258 | 260) {
         return Err(unsupported(
             "QuickTime still image transfer mode is outside the copy/blend/alpha profile",
         ));
@@ -822,14 +822,14 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
         palette.as_ref(),
         budget,
     )?;
-    if matches!(mode, 0 | 32)
+    if matches!(mode, 0 | 32 | 36)
         && decoded
             .alpha
             .as_ref()
             .is_some_and(|a| a.iter().any(|&a| a != 255))
     {
         return Err(unsupported(
-            "nonopaque QuickTime copy/blend is outside the portable profile; an alpha transfer mode must be recorded",
+            "nonopaque QuickTime copy/blend/key is outside the portable profile; an alpha transfer mode must be recorded",
         ));
     }
     if mode >= 256 && decoded.alpha.is_none() {
