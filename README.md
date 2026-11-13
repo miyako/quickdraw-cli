@@ -14,7 +14,7 @@ documented source transfer modes under an explicit portable policy.
 Resource forks, MacBinary, AppleDouble and AppleSingle support explicit picture
 and font-resource selection. Explicit Roman FOND bindings provide exact bitmap
 associations, family fractional widths and opt-in within-run pair kerning.
-Embedded JPEG/PNG, direct-color raw/Animation, Apple Video (RPZA), and Apple
+Embedded JPEG/PNG, direct-color and explicitly paletted 1/2/4/8-bit raw/Animation, Apple Video (RPZA), and Apple
 Graphics (SMC with an explicit embedded palette) still images support bounded
 decoding without temporal-frame guesses. Nonsingular affine placement and recorded straight/premultiplied alpha
 use an explicit portable policy. Separate matte payloads remain unsupported.

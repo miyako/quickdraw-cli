@@ -126,6 +126,10 @@ Protocol 1, archive layout and existing raw-font/opaque-image behavior are uncha
 RPZA and explicitly paletted SMC still decoding are also additive capabilities.
 Their temporal skips, missing caches and unavailable palettes remain errors;
 consumers must not retry by supplying guessed prior pixels or system palettes.
+Indexed raw/Animation depths 1/2/4/8 are additive, requiring the same explicit
+embedded palette contract. Capabilities retain the direct-depth field and add
+`quicktime_indexed_raw_animation_depths`, `quicktime_indexed_palette` and
+`quicktime_animation_frames`; no protocol, invocation or archive-schema break.
 Schema-1 font maps now optionally select `outline:{face_index,encoding:"macroman",
 kerning:false}` for exact static TrueType sfnt/TTC input. `portable_outline_v1`
 is separately reported and requires approximate fidelity; bitmap bindings and

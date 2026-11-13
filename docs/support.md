@@ -45,7 +45,7 @@ emits an operation-offset warning for every accepted approximation.
 | Highlight (`1C`-`1E`, modes 50/52/58/60) | Exchanges background/highlight colors, leaves other destination colors intact; one-shot HiliteMode; explicit HiliteColor or CLI highlight required |
 | Transparent pattern mode 44 | Whole-pixel background keying |
 | Dithering / other extended modes | Unsupported; never silently mapped to copy |
-| QuickTime compressed (`8200`) | JPEG/PNG, direct raw/Animation, RGB555 RPZA and explicitly paletted SMC self-contained stills; exact explicit boundaries in CLI contract |
+| QuickTime compressed (`8200`) | JPEG/PNG, direct and explicitly paletted 1/2/4/8-bit raw/Animation, RGB555 RPZA and explicitly paletted SMC self-contained stills; exact explicit boundaries in CLI contract |
 | QuickTime affine/alpha | Nonsingular affine rotation/reflection/shear/fractional placement; straight and premultiplied white/black alpha, explicit approximate policy; source mask, clip and origin preserved |
 | QuickTime uncompressed (`8201`) / other codecs | Explicitly unsupported; no silent substitute decoder |
 | Unknown opcodes / unknown length layouts | Fail with offset and opcode; no recovery by guessing |
@@ -53,10 +53,62 @@ emits an operation-offset warning for every accepted approximation.
 | PNG | Opaque RGB output |
 | SVG / PDF | Explicit whole-picture raster or supported genuine-path policy; PDF 1.4 single page |
 | Native vector subset | Tiled patterns, copied/straight-alpha image layers, shapes/regions and NFNT runs; diagonal/polygon/arc/complex-region frames use shared pixel-run coverage |
-| Remaining embedded-image gaps | Separate matte payloads, projective matrices, other transfer modes, extensions, temporal/skipped-pixel Animation, paletted/grayscale RLE, planar/paletted raw, CMYK/16-bit-channel images; preserved premultiplied alpha needs whole-picture raster |
+| Remaining embedded-image gaps | Separate matte payloads, projective matrices, other transfer modes, extensions, temporal/skipped-pixel Animation, implicit palettes/grayscale depth codes, planar raw, CMYK/16-bit-channel images; preserved premultiplied alpha needs whole-picture raster |
 | Portable outline text | Explicit static TrueType sfnt/TTC face, declared post-8.5 MacRoman, Rustybuzz Latin/LTR shaping, fixed optional features, opt-in kerning, genuine glyph paths; approximate-only |
 | Classic outline/multibyte/color text, synthetic FOND styles, script-specific justification | Unsupported; no silent substitution; scaling-disabled nonunit ratios and nonpositive ratios fail |
 | Classic screen emulation | Not implemented |
+
+### Standard opcode inventory
+
+This groups **every named core opcode** in Apple's Appendix A, not merely
+opcodes whose lengths can be skipped. Hex ranges below include only the listed
+endpoints/ranges, not intervening reserved codes. "Implemented" means executable
+portable behavior under the restrictions above; it does not mean all styles,
+modes, device states or historical edge rules are supported.
+
+| Core opcode(s) | Executable coverage / boundary |
+| --- | --- |
+| `00` NOP; `11` VersionOp; `FF` OpEndPic; `0C00` HeaderOp | Parsed structure/no drawing; initial version and required v2 header checked, not accepted as arbitrary midstream state changes |
+| `01` Clip; `02` BkPat; `07`-`0C` pen/pattern/OvSize/Origin | Implemented ordered state; no implicit device/global pattern phase |
+| `03`-`06`, `0D`, `10`, `15`-`16` text state | Implemented exact supplied-font binding and portable layout; unsupported combinations fail at text use |
+| `0E`-`0F`, `12`-`14`, `1A`-`1F` color/pixel-pattern/highlight/OpColor state | Implemented; explicit highlight/OpColor needed where not recorded; restricted PixMap layouts |
+| `20`-`23` Line/LineFrom/ShortLine/ShortLineFrom | Implemented; diagonal pens approximate, source-only preserved frames use shared pixel coverage |
+| `28`-`2B` LongText/DHText/DVText/DHDVText | Implemented with supplied NFNT/FONT or explicit portable MacRoman TrueType binding; no inferred encoding/font |
+| `2C` fontName | Retained metadata, deliberately not font discovery or substitution |
+| `2D` lineJustify; `2E` glyphState | Known records parsed; nonzero justification and PreserveGlyph unsupported; other flags depend on font/layout profile |
+| `30`-`34`, `38`-`3C` rectangles | All five verbs and same-rectangle forms implemented |
+| `40`-`44`, `48`-`4C` rounded rectangles | All five verbs and same-bound forms implemented, approximate |
+| `50`-`54`, `58`-`5C` ovals | All five verbs and same-bound forms implemented, approximate |
+| `60`-`64`, `68`-`6C` arcs | All five verbs and same-bound forms implemented, approximate; each arc has its own start/sweep |
+| `70`-`74` polygons; `80`-`84` regions | All five verbs implemented; polygons/complex frames approximate |
+| `78`-`7C`, `88`-`8C` same polygon/region | Unsupported, not silently repeated; Apple itself labels these ten entries "Not yet implemented" |
+| `90`-`91`, `98`-`99`, `9A`-`9B` Bits/PackBits/DirectBits rectangle/region | Implemented constrained mono/indexed/direct PixMaps, packing and compositing described above |
+| `A0`-`A1` ShortComment/LongComment | Retained, not executed printer/PostScript semantics; strict rejects, approximate explicitly warns |
+| Other reserved ranges with documented byte lengths | Retained/skipped with diagnostics, not advertised as implemented drawing; `17`-`19` lack determined sizes and fail |
+| Later `8200` / `8201` QuickTime extensions | `8200` supported still profile below; `8201` retained but unsupported |
+
+Thus the common core drawing families are present; the remaining standard-opcode
+gaps are specific text-state/comment semantics and the appendix's unimplemented
+same-poly/region entries, plus restricted operand/layout/mode combinations.
+Genuine vector support is a **second** gate: destination-dependent drawing and
+premultiplied image alpha require explicit whole-picture raster fallback, never
+an isolated transparent overlay.
+
+### Common still-image variant inventory
+
+| FourCC / variant | Implemented | Explicitly outside current profile |
+| --- | --- | --- |
+| `raw ` | Interleaved RGB555/RGB24/ARGB32; explicit-palette packed 1/2/4/8-bit indices, even-byte rows | Grayscale depth codes, default/resource palettes, planar layouts, other depths |
+| `rle ` Animation | Self-contained 1/2/4/8/16/24/32-bit frames; explicit palettes; packed group literals/repeats, monochrome pair controls; header 0/full header 8 | Skipped visible pixels, partial/unchanged frames, unknown header/size flags, grayscale depth codes, implicit palettes |
+| `rpza` Apple Video | Self-contained RGB555 solid/interpolated/literal blocks; depth 16 or 24 descriptors | Previous-frame skips, unknown variants |
+| `smc ` Apple Graphics | Self-contained 8-bit indexed blocks, explicit palette, initialized same-frame caches/repeats | Previous-frame skips, absent caches, default/resource palettes |
+| `jpeg` | Established decoder, 8-bit RGB/grayscale | CMYK and higher precision |
+| `png ` | Established decoder, expanded 8-bit RGB/grayscale/indexed PNG with optional alpha from PNG data | APNG and 16-bit channels |
+| `cvid`, `tiff`, `gif ` and other codec IDs | No decoder advertised | Unsupported; add only explicit still/layout contracts with bounded decoder evidence |
+| Shared image-description/placement | Base description plus supplied table, one frame, source crop/mask, supported affine/alpha | Separate PICT matte, extended descriptions (including zero terminator), perspective and other transfer modes |
+
+This is a documented-format inventory, **not** a measured frequency ranking;
+no representative user corpus has been supplied. Work priorities are below.
 
 ## Raster profile `portable_rgb_v1`
 
@@ -177,6 +229,19 @@ the independent decoder's output, not falsely against uncompressed originals.
 CLI PNG checks compare all fifteen reference images exactly. PDFium checks
 RPZA/SMC affine reflections/shears and masked, clipped, origin-adjusted image
 layers over existing drawing; SVG checks preserve surrounding geometry.
+`tests/fixtures/quicktime-packed.json` adds twelve authored raw/Animation packets
+(four indexed depths, literal/repeat and partial storage-unit edges) independently
+decoded to RGB by FFmpeg 7.1.1. A thirteenth packet is independently **encoded**
+by FFmpeg's gray Animation encoder, unchanged, then rebound to an explicit
+depth-8 color table and independently decoded. Its white-zero indices are
+retained; this does not enable grayscale description depths in the converter.
+`scripts/generate_packed_fixtures.py` checks all reference results against the
+authored input indices/colors before recording them. FFmpeg has no encoder for
+the other packed depths here; those cases are decoder evidence, not independent
+encoding evidence. Native Rust/CLI comparisons are exact. PDFium additionally
+compares reflected/sheared, masked, clipped and origin-adjusted indexed layers
+over drawing; SVG retains image layers. Malformed, truncated, undefined-palette,
+temporal, run-overflow and resource-limit cases remain observable errors.
 Font-resource fixtures construct original NFNT/FONT/FOND maps and AppleSingle
 entries. Cases cover exact/ambiguous associations, source aliases, optional
 directory bounds, truncation, duplicate pairs, width precedence/disablement,
@@ -235,12 +300,18 @@ jobs is not evidence that Windows tests passed.
   picture fields and source-region transition layout; no implementation copied.
   Matrix fields follow QuickTime 16.16 affine and 2.30 projective conventions.
 * [Apple, video sample data](https://developer.apple.com/documentation/quicktime-file-format/video_sample_data):
-  raw scanline alignment and packed RGB555/RGB24/ARGB32 channel order.
+  raw scanline alignment, packed palette indices and RGB555/RGB24/ARGB32 channel order.
 * [Apple, graphics modes](https://developer.apple.com/documentation/quicktime-file-format/graphics_modes):
   straight and white/black premultiplied alpha definitions.
 * [MultimediaWiki, Apple QuickTime RLE](https://wiki.multimedia.cx/index.php/Apple_QuickTime_RLE):
-  Animation header, row runs, skips and direct-color formats; FFmpeg `qtrleenc.c`
-  corroborates direct-color keyframe encoding. No codec implementation copied.
+  Animation header, row runs, skips and packed/direct formats. Its older
+  [text description](https://multimedia.cx/qtrle.txt) explicitly withdrew
+  inaccurate 1/2-bit details; the generic byte-depth row grammar must not be
+  applied to monochrome data. The monochrome row-start bit and pair controls
+  are corroborated by the [FFmpeg 7.1.1 decoder's format comments](https://github.com/FFmpeg/FFmpeg/blob/n7.1.1/libavcodec/qtrle.c)
+  and [monochrome row-start regression report](https://trac.ffmpeg.org/ticket/226).
+  FFmpeg independently decodes all packed fixtures and encodes the 8-bit group
+  fixture. No codec implementation code or historical samples are copied.
 * [Apple, video sample description](https://developer.apple.com/documentation/quicktime-file-format/video_sample_description)
   and [color table ID](https://developer.apple.com/documentation/quicktime-file-format/video_sample_description/color_table_id):
   compression identifiers, depth and embedded-table placement. The
@@ -313,8 +384,8 @@ contract, not a requirement to implement every imaginable historical extension.
 | --- | --- | --- |
 | Remaining family behavior | Documented synthetic-style properties and richer metadata inspection can be implemented if added to the supported contract | Negative version-0/1 values need a resolved representation contract or identified historical samples; current exact intrinsic bindings do not synthesize styles |
 | Outline fonts and encodings | Portable Roman static TrueType outlines implemented; CFF and other declared encodings can be added independently | Matching fonts and source encoding must be supplied. Classic metrics remain separate; non-Roman language/direction/shaping needs a new explicit contract |
-| Justification | Implement documented simple-script spacing once the input encoding/script contract is explicit | Script identity and representative recorded lineJustify/ChExtra cases; a raw NFNT does not identify a Script Manager environment |
-| Embedded images | Raw/Animation, RPZA, explicitly paletted SMC, affine placement and explicit alpha modes implemented; other codecs, packed paletted variants and OpColor modes remain implementable | Separate PICT matte byte layout, coordinate mapping and mode interaction need a verified specification or provenance-backed samples; movie matte atoms are not sufficient evidence |
+| Justification | The declared portable Roman outline profile now provides a basis for documented Roman spacing; implement and test the exact recorded lineJustify interpretation | Non-Roman script identity remains a contract decision; a raw NFNT does not identify a Script Manager environment |
+| Embedded images | Indexed/direct raw/Animation, RPZA, explicitly paletted SMC, affine placement and explicit alpha modes implemented; explicit grayscale profiles, bounded description extensions, other codecs and OpColor modes remain implementable | Separate PICT matte byte layout, coordinate mapping and mode interaction need a verified specification or provenance-backed samples; movie matte atoms are not sufficient evidence |
 | Preserved vector coverage | Shared diagonal/polygon/arc/complex-region frame paths implemented; destination-dependent operations still require full-composite fallback | Editable continuous geometry versus portable pixel-run presentation remains a fidelity choice; premultiplied source-over needs a representable precision contract before preserved-vector support |
 | Additional containers | Explicit native resource-fork access can build on current extraction; AppleSingle v2 is implemented | Filesystem behavior and deployment policy must be tested per platform |
 | Classic fidelity | Improve specification-backed coverage and differential backend checks now | Pixel equivalence requires an identified OS/QuickDraw/device/font setup, lawful reference outputs and a representative corpus |
@@ -325,17 +396,18 @@ fractional placement and whole-run compositing remain explicitly portable;
 historical chunk boundaries, cached font data, printer adjustments, global
 pattern phase and implicit system colors/fonts are not reconstructed.
 
-### Ordinary real-file gaps after block-codec support
+### Prioritized ordinary compatibility gaps after packed stills
 
-Without assuming a particular user corpus, useful next implementation work is
-packed/paletted raw and Animation variants, documented default palettes under an
-explicit contract, bounded image-description extensions (including the optional
-zero terminator), other still codecs such as Cinepak/TIFF/GIF, and documented
-OpColor alpha blend. Files depending on previous movie frames cannot become
-self-contained stills without supplying those frames. Native resource-fork
-access remains a deployment convenience beyond the existing portable containers.
-Printer comments, color management and device-specific behavior remain separate
-from successful decoding; unsupported instructions must continue to fail.
+| Priority by documented scope (not guessed corpus frequency) | Next implementable work / boundary |
+| --- | --- |
+| 1. Common existing-record variants | Bounded image-description extensions/optional zero terminator; explicit grayscale depth/polarity profiles; documented image OpColor blend. Require verified layouts and tests, not a new historical oracle |
+| 2. Existing standard text operations | Portable Roman lineJustify and supported additional static outline formats such as CFF; retain supplied fonts, fixed encoding, spacing and feature contracts |
+| 3. Additional named still codecs / containers | Evaluate portable bounded TIFF/GIF/Cinepak decoders for self-contained images; `8201` only after its specific PICT layout is established; native resource-fork access is deployment convenience |
+| 4. New policies rather than guessed defaults | Default/resource image palettes require explicit identification/provenance; printer comment execution needs a defined supported comment contract; color management/device behavior is separate |
+
+Temporal files cannot become self-contained stills without supplying their
+previous frames. The undefined same-poly/region entries are not a reason to
+invent QuickDraw behavior or block a decision about the existing supported set.
 The separate-matte blocker is specifically the PICT payload layout, coordinate
 mapping, coverage/polarity and transfer-mode interaction, not movie `kmat`
 atom knowledge or a general demand for a historical oracle.

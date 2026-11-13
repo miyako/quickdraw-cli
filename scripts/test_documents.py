@@ -133,6 +133,28 @@ class Documents(unittest.TestCase):
                 self.assertTrue(tree.findall(".//s:path",ns))
                 self.assertEqual(len(tree.findall(".//s:image",ns)),1)
 
+    def test_packed_stills_match_reference_and_preserve_clipped_image_layers(self):
+        cases = json.loads((Path(__file__).resolve().parent.parent / "tests/fixtures/quicktime-packed.json").read_text())["cases"]
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                width,height = case["width"],case["height"]
+                args=(case["codec"].encode(),width,height,case["depth"],bytes.fromhex(case["packet"]))
+                palette=bytes.fromhex(case["palette"])
+                result,target=self.convert("png",operations=[(0x8200,quicktime(*args,palette=palette))],frame=(0,0,height,width))
+                self.assertEqual(result.returncode,0,result.stderr)
+                with Image.open(target) as image:
+                    self.assertEqual(image.convert("RGB").tobytes(),bytes.fromhex(case["rgb"]))
+                if not case["name"].endswith("repeat"):
+                    continue
+                mask=words(0,1,width-1,32767,height,1,width-1,32767,32767)
+                operations=[(0x31,words(0,0,12,40)),(0x0c,words(1,1)),(1,words(10,1,3,11,38)),
+                            (0x8200,quicktime(*args,palette=palette,mask=mask,
+                                matrix=[-65536,16384,0,32768,65536,0,34*65536,32768,1<<30]))]
+                self.compare_pdf_with_raster(operations,frame=(0,0,12,40),extra=("--fidelity","approximate"))
+                result,target=self.convert("svg",operations=operations,frame=(0,0,12,40),extra=("--fidelity","approximate"))
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(len(ET.parse(target).findall(".//{http://www.w3.org/2000/svg}image")),1)
+
     def convert(self, extension, policy="preserve", operations=None, extra=(), frame=(0,0,10,20)):
         source, target = self.root / "input.pict", self.root / f"output.{extension}"
         source.write_bytes(picture(operations or [(0x31, words(0, 0, 10, 20))], frame))

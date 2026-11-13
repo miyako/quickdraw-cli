@@ -407,16 +407,16 @@ Compressed QuickTime opcode `8200` supports `jpeg`, `png `, `raw `, `rle `,
 (spaces are part of the FourCC). JPEG/PNG use established Rust decoders; the
 raw/Animation and block-codec readers are bounded implementations of published
 formats. Records require version 0, an 86-byte base image description, one frame,
-and no separate matte or external palette. Only SMC's explicitly embedded color
-table may extend that description. Dimensions must match codec headers where
+and no separate matte or external palette. An explicitly embedded indexed
+raw/Animation/SMC color table may extend that description. Dimensions must match codec headers where
 the codec supplies them; block codecs use the description's dimensions.
 
 | Codec | Supported payload |
 | --- | --- |
 | `jpeg` | 8-bit RGB/grayscale; no CMYK or 16-bit samples |
 | `png ` | Expanded RGB/grayscale, with optional unassociated alpha; no 16-bit PNG or APNG |
-| `raw ` | Packed RGB555 (depth 16, high bit zero), RGB24, ARGB32; each scanline padded to even bytes; pad bytes are ignored, not pixels |
-| `rle ` | Animation full-frame RGB555 (unused high bit ignored), RGB24, ARGB32; literal/repeat runs bounded to a row |
+| `raw ` | Explicitly paletted depths 1/2/4/8, MSB-first indices; RGB555 (depth 16, high bit zero), RGB24, ARGB32; each scanline padded to even bytes; pad bits/bytes are ignored, not pixels |
+| `rle ` | Explicitly paletted depths 1/2/4/8; full-frame RGB555 (unused high bit ignored), RGB24, ARGB32; literal/repeat runs bounded to a row |
 | `rpza` | Apple Video 4x4 RGB555 blocks: solid runs, explicit/implicit interpolated quads, and sixteen-color blocks; description depth 16 or 24, no palette |
 | `smc ` | Apple Graphics 4x4 indexed blocks: solid/literal, 2/4/8-color caches and same-frame block repeats; depth 8 and a supplied embedded color table |
 
@@ -425,9 +425,26 @@ flags. Header 0 is supported; header 8 is accepted only for start line zero,
 all image rows, and zero reserved fields. Every pixel must be supplied by the
 still: nonzero skips, early row/frame endings, partial updates and unchanged
 frames fail instead of inventing prior-frame pixels. A zero-distance skip is
-permitted. A single final zero terminator is optional after all rows; trailing
-data fails. Palette/grayscale/packed low-depth Animation variants remain
-unsupported. Run-command count, decoded bytes, pixels and work are bounded.
+permitted. At depths 2/4/8, a run unit is four packed bytes containing 16/8/4
+MSB-first indices respectively; a negative run repeats that whole unit. A row
+must supply exactly `ceil(width / pixels_per_unit)` units; only the last unit's
+unused storage pixels are cropped, not looked up in the palette. At depths
+16/24/32, a unit remains one pixel. A single final zero terminator is optional
+after all rows at these depths; trailing data fails.
+
+Depth 1 has its own command-pair grammar: `(skip, signed run)`; skip bit 7
+starts the next row (the first such marker starts row zero), low 7 bits skip
+16-pixel groups. Only zero-distance skips are accepted. Positive runs contain
+two bytes per group, negative runs below -1 repeat one two-byte group, and -1
+is a no-data command, **not** the byte-depth end-of-row marker. Every row must
+be complete before starting the next; `(0,0)` terminates the complete still.
+Other terminator flags, extra rows and trailing bytes fail. This explicit
+interoperability profile is backed by independently decoded fixtures and the
+FFmpeg monochrome control description, not a recovered Apple codec oracle.
+
+Raw/Animation grayscale description depths 33/34/36/40, implicit palettes,
+planar raw layouts and temporal frames remain unsupported. Run-command count,
+decoded bytes, pixels, padded-group expansion and work are bounded.
 
 RPZA/SMC blocks are consumed left-to-right then top-to-bottom on a grid rounded
 up to multiples of four. Edge padding is decoded but cropped from output;
@@ -446,19 +463,19 @@ interpolation floors each weighted 5-bit component before bit replication to
 8-bit RGB. Blocks, intermediate buffers, caches, commands and work count against
 the existing limits; no native library or decoder subprocess is invoked.
 
-SMC requires color-table ID 0 and a color table immediately after the image
+Indexed raw/Animation and SMC require color-table ID 0 and a color table immediately after the image
 description's 86-byte base, included in its declared size. The supported QTFF
-table has a seed, flags `0x8000`, count-minus-one (1..256 entries), and sequential
+table has a seed, flags `0x8000`, count-minus-one (1..2^depth entries), and sequential
 entries of reserved-zero plus 16-bit RGB components. Components use their high
 byte, consistently with existing QuickDraw color handling. Undefined palette
 references are malformed. Other flags, nonzero reserved entry values, default
 table ID -1, external/resource IDs and description extensions are unsupported;
 there is no assumed system palette or inferred transparency.
 
-RPZA/SMC produce opaque RGB and therefore support recorded srcCopy, not alpha
+Indexed raw/Animation and RPZA/SMC produce opaque RGB and therefore support recorded srcCopy, not alpha
 transfer modes. They use the existing shared affine sampling, source mask,
 destination clip/origin and preserved-vector image placement. Existing
-JPEG/PNG/raw/Animation behavior is unchanged; neither block codec supplies alpha.
+Direct-color and JPEG/PNG behavior is unchanged; indexed and block codecs do not supply alpha.
 
 Nonsingular 16.16 affine matrices support rotation, reflection, shear and
 fractional edges/translations under `--fidelity approximate`. Projective entries

@@ -125,22 +125,55 @@ fn direct(
     width: usize,
     height: usize,
     depth: u16,
+    palette: Option<&Palette>,
     budget: &mut Budget<'_>,
 ) -> Result<Decoded> {
-    if !matches!(depth, 16 | 24 | 32) {
+    if !matches!(depth, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
         return Err(unsupported(
-            "QuickTime raw/Animation supports only packed RGB555, RGB24 and ARGB32; palettes/grayscale are unsupported",
+            "QuickTime raw/Animation depth is outside the supported indexed/direct profile",
         ));
     }
-    let step = usize::from(depth / 8);
+    let indexed = depth <= 8;
+    if indexed && palette.is_none() {
+        return Err(unsupported(
+            "indexed QuickTime requires supplied palette entries",
+        ));
+    }
+    let group = if indexed && codec == b"rle " {
+        match depth {
+            1 | 2 => 16,
+            4 => 8,
+            _ => 4,
+        }
+    } else {
+        1
+    };
+    let step = if indexed {
+        (usize::from(depth) * group).div_ceil(8)
+    } else {
+        usize::from(depth / 8)
+    };
     let pixels = width * height;
     budget.allocate(pixels * 4)?;
     let mut image = Decoded {
         rgb: vec![0; pixels * 3],
         alpha: (depth == 32).then(|| vec![0; pixels]),
     };
-    let mut put = |index: usize, bytes: &[u8]| -> Result<()> {
-        let (rgb, alpha) = direct_pixel(bytes, depth, codec == b"raw ")?;
+    let mut put = |index: usize, bytes: &[u8], bit: usize| -> Result<()> {
+        let (rgb, alpha) = if indexed {
+            let color = usize::from(
+                (bytes[bit / 8] >> (8 - usize::from(depth) - bit % 8))
+                    & ((1u16 << depth) - 1) as u8,
+            );
+            (
+                palette.expect("palette checked")[color].ok_or_else(|| {
+                    malformed("indexed QuickTime pixel references absent palette entry")
+                })?,
+                255,
+            )
+        } else {
+            direct_pixel(bytes, depth, codec == b"raw ")?
+        };
         image.rgb[index * 3..index * 3 + 3].copy_from_slice(&rgb);
         if let Some(values) = &mut image.alpha {
             values[index] = alpha;
@@ -148,7 +181,7 @@ fn direct(
         Ok(())
     };
     if codec == b"raw " {
-        let stride = (width * step + 1) & !1;
+        let stride = ((width * usize::from(depth)).div_ceil(8) + 1) & !1;
         if bytes.len() != stride * height {
             return Err(malformed(
                 "QuickTime raw length must equal even-byte-padded scanlines",
@@ -156,8 +189,16 @@ fn direct(
         }
         for y in 0..height {
             for x in 0..width {
-                let at = y * stride + x * step;
-                put(y * width + x, &bytes[at..at + step])?;
+                if indexed {
+                    put(
+                        y * width + x,
+                        &bytes[y * stride..(y + 1) * stride],
+                        x * usize::from(depth),
+                    )?;
+                } else {
+                    let at = y * stride + x * step;
+                    put(y * width + x, &bytes[at..at + step], 0)?;
+                }
             }
         }
         return Ok(image);
@@ -199,7 +240,73 @@ fn direct(
         }
         _ => return Err(unsupported("Animation chunk header flags are unsupported")),
     }
+    let row_groups = width.div_ceil(group);
+    budget.work((row_groups * group * height) as u64)?;
     let mut commands = 0usize;
+    if depth == 1 {
+        // Monochrome Animation uses (skip,code) pairs, not the byte-depth
+        // row grammar: skip bit 7 starts a row; the low bits skip 16-pixel groups.
+        let mut row = None;
+        let mut x = 0;
+        loop {
+            count_command(&mut commands, budget)?;
+            let skip = r.byte()?;
+            let code = r.byte()? as i8;
+            if code == 0 {
+                if skip != 0 {
+                    return Err(unsupported("unknown monochrome Animation terminator flags"));
+                }
+                if row != Some(height - 1) || x != row_groups {
+                    return Err(unsupported(
+                        "monochrome Animation incomplete still requires previous pixels",
+                    ));
+                }
+                break;
+            }
+            if skip & 0x7f != 0 {
+                return Err(unsupported(
+                    "monochrome Animation skips require previous pixels",
+                ));
+            }
+            if skip & 0x80 != 0 {
+                if row.is_some() && x != row_groups {
+                    return Err(unsupported(
+                        "monochrome Animation incomplete row requires previous pixels",
+                    ));
+                }
+                let next = row.map_or(0, |y| y + 1);
+                if next >= height {
+                    return Err(malformed("monochrome Animation row exceeds image"));
+                }
+                row = Some(next);
+                x = 0;
+            }
+            let y =
+                row.ok_or_else(|| malformed("monochrome Animation lacks initial row marker"))?;
+            if code == -1 {
+                continue;
+            }
+            let count = usize::from(code.unsigned_abs());
+            if x + count > row_groups {
+                return Err(malformed("monochrome Animation run exceeds row"));
+            }
+            let data = r.take(if code > 0 { count * step } else { step })?;
+            for n in 0..count {
+                let start = if code > 0 { n * step } else { 0 };
+                for i in 0..group {
+                    let sx = (x + n) * group + i;
+                    if sx < width {
+                        put(y * width + sx, &data[start..start + step], i)?;
+                    }
+                }
+            }
+            x += count;
+        }
+        if r.at != bytes.len() {
+            return Err(malformed("trailing data after monochrome Animation still"));
+        }
+        return Ok(image);
+    }
     for y in 0..height {
         if r.byte()? != 1 {
             return Err(unsupported(
@@ -208,17 +315,10 @@ fn direct(
         }
         let mut x = 0usize;
         loop {
-            commands += 1;
-            if commands > budget.limits.max_operations {
-                return Err(Error::new(
-                    ErrorCode::ResourceLimit,
-                    "Animation command count limit exceeded",
-                ));
-            }
-            budget.work(1)?;
+            count_command(&mut commands, budget)?;
             let code = r.byte()? as i8;
             if code == -1 {
-                if x != width {
+                if x != row_groups {
                     return Err(unsupported(
                         "Animation incomplete row requires a previous frame",
                     ));
@@ -234,21 +334,24 @@ fn direct(
                 continue;
             }
             let count = usize::from(code.unsigned_abs());
-            if x + count > width {
+            if x + count > row_groups {
                 return Err(malformed("Animation run exceeds scanline"));
             }
-            if code > 0 {
-                for pixel in r.take(count * step)?.chunks_exact(step) {
-                    put(y * width + x, pixel)?;
-                    x += 1;
-                }
-            } else {
-                let pixel = r.take(step)?;
-                for _ in 0..count {
-                    put(y * width + x, pixel)?;
-                    x += 1;
+            let data = r.take(if code > 0 { count * step } else { step })?;
+            for n in 0..count {
+                let start = if code > 0 { n * step } else { 0 };
+                for i in 0..group {
+                    let sx = (x + n) * group + i;
+                    if sx < width {
+                        put(
+                            y * width + sx,
+                            &data[start..start + step],
+                            i * usize::from(depth),
+                        )?;
+                    }
                 }
             }
+            x += count;
         }
     }
     if r.at < bytes.len() && r.byte()? != 0 {
@@ -258,6 +361,17 @@ fn direct(
         return Err(malformed("trailing data after Animation still frame"));
     }
     Ok(image)
+}
+
+fn count_command(count: &mut usize, budget: &mut Budget<'_>) -> Result<()> {
+    *count += 1;
+    if *count > budget.limits.max_operations {
+        return Err(Error::new(
+            ErrorCode::ResourceLimit,
+            "Animation command count limit exceeded",
+        ));
+    }
+    budget.work(1)
 }
 
 struct RleReader<'a> {
@@ -299,7 +413,7 @@ pub(crate) fn decode(
     budget.work(pixels as u64 * 4 + bytes.len() as u64)?;
     match codec {
         b"rpza" | b"smc " => blocks::decode(codec, bytes, width, height, palette, budget),
-        b"raw " | b"rle " => direct(codec, bytes, width, height, depth, budget),
+        b"raw " | b"rle " => direct(codec, bytes, width, height, depth, palette, budget),
         b"png " => {
             if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
                 return Err(malformed("invalid embedded PNG signature"));

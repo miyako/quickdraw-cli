@@ -719,7 +719,7 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
     d.take(32)?;
     let depth = d.u16()?;
     let supported_depth = if matches!(codec, b"raw " | b"rle ") {
-        matches!(depth, 16 | 24 | 32)
+        matches!(depth, 1 | 2 | 4 | 8 | 16 | 24 | 32)
     } else if codec == b"rpza" {
         matches!(depth, 16 | 24)
     } else if codec == b"smc " {
@@ -727,16 +727,17 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
     } else {
         matches!(depth, 8 | 24 | 32 | 40)
     };
+    let indexed = codec == b"smc " || (matches!(codec, b"raw " | b"rle ") && depth <= 8);
     let table_id = d.u16()?;
-    if !supported_depth || (codec != b"smc " && table_id != 0xffff) {
+    if !supported_depth || (!indexed && table_id != 0xffff) {
         return Err(unsupported(
             "QuickTime image depth or external color table not implemented",
         ));
     }
-    let palette = if codec == b"smc " {
+    let palette = if indexed {
         if table_id != 0 {
             return Err(unsupported(
-                "SMC requires an explicit embedded palette; default/resource color tables are not inferred",
+                "indexed QuickTime requires an explicit embedded palette; default/resource color tables are not inferred",
             ));
         }
         d.u32()?;
@@ -746,8 +747,8 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
             ));
         }
         let entries = usize::from(d.u16()?) + 1;
-        if entries > 256 {
-            return Err(malformed("QuickTime palette exceeds 256 colors"));
+        if entries > (1usize << depth) {
+            return Err(malformed("QuickTime palette exceeds indexed depth"));
         }
         budget.allocate(std::mem::size_of::<crate::codec::Palette>())?;
         let mut palette = [None; 256];

@@ -63,8 +63,196 @@ fn unhex(s: &str) -> Vec<u8> {
 
 #[test]
 fn independently_encoded_stills_match_ffmpeg_decoded_pixels() {
+    for json in [
+        include_str!("fixtures/quicktime-blocks.json"),
+        include_str!("fixtures/quicktime-packed.json"),
+    ] {
+        let fixtures: serde_json::Value = serde_json::from_str(json).unwrap();
+        for case in fixtures["cases"].as_array().unwrap() {
+            let codec: &[u8; 4] = case["codec"]
+                .as_str()
+                .unwrap()
+                .as_bytes()
+                .try_into()
+                .unwrap();
+            let width = case["width"].as_u64().unwrap() as u16;
+            let height = case["height"].as_u64().unwrap() as u16;
+            let data = payload(
+                codec,
+                width,
+                height,
+                case["depth"].as_u64().unwrap() as u16,
+                &unhex(case["packet"].as_str().unwrap()),
+                &unhex(case["palette"].as_str().unwrap()),
+            );
+            let rgb = decode(&data, width as i16, height as i16, Limits::default()).unwrap();
+            assert_eq!(
+                rgb,
+                unhex(case["rgb"].as_str().unwrap()),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+}
+
+fn animation(body: &[u8]) -> Vec<u8> {
+    let mut data = ((body.len() + 6) as u32).to_be_bytes().to_vec();
+    data.extend_from_slice(&[0, 0]);
+    data.extend_from_slice(body);
+    data
+}
+
+#[test]
+fn packed_raw_rows_are_high_bit_first_and_word_aligned() {
+    for (depth, width, row, indices) in [
+        (1, 3, vec![0xa0, 0xff], vec![1, 0, 1]),
+        (2, 3, vec![0x6f, 0xff], vec![1, 2, 3]),
+        (4, 3, vec![0x12, 0x3f], vec![1, 2, 3]),
+        (8, 3, vec![1, 2, 3, 255], vec![1, 2, 3]),
+    ] {
+        let rows = [row.as_slice(), row.as_slice()].concat();
+        let data = payload(
+            b"raw ",
+            width,
+            2,
+            depth,
+            &rows,
+            &table(if depth == 1 { 2 } else { 4 }),
+        );
+        let rgb = decode(&data, width as i16, 2, Limits::default()).unwrap();
+        let expected: Vec<u8> = indices
+            .iter()
+            .chain(&indices)
+            .flat_map(|i| [*i, 0, 0])
+            .collect();
+        assert_eq!(rgb, expected, "depth {depth}");
+    }
+}
+
+#[test]
+fn indexed_images_require_explicit_palette_and_defined_visible_entries() {
+    for codec in [b"raw ", b"rle "] {
+        let packet = if codec == b"raw " {
+            vec![0x40, 0]
+        } else {
+            animation(&[1, 1, 0x40, 0, 0, 0, 255, 0])
+        };
+        let data = payload(codec, 1, 1, 2, &packet, &[]);
+        assert_eq!(
+            decode(&data, 1, 1, Limits::default()).unwrap_err().code,
+            ErrorCode::Unsupported
+        );
+        let data = payload(codec, 1, 1, 2, &packet, &table(1));
+        assert_eq!(
+            decode(&data, 1, 1, Limits::default()).unwrap_err().code,
+            ErrorCode::Malformed
+        );
+        let data = payload(codec, 1, 1, 2, &packet, &table(5));
+        assert_eq!(
+            decode(&data, 1, 1, Limits::default()).unwrap_err().code,
+            ErrorCode::Malformed
+        );
+        let data = payload(codec, 1, 1, 2, &packet, &table(2));
+        assert_eq!(decode(&data, 1, 1, Limits::default()).unwrap(), [1, 0, 0]);
+    }
+}
+
+#[test]
+fn packed_animation_groups_crop_only_final_storage_padding() {
+    for (depth, group, unit) in [
+        (2, 16, vec![0x6c, 0x6c, 0x6c, 0x6c]),
+        (4, 8, vec![0x12, 0x30, 0x12, 0x30]),
+        (8, 4, vec![1, 2, 3, 0]),
+    ] {
+        let mut body = vec![1, 1];
+        body.extend(&unit);
+        body.extend([0, 1, 254]);
+        body.extend(&unit);
+        body.extend([255, 0]);
+        let data = payload(
+            b"rle ",
+            group * 3 - 1,
+            1,
+            depth,
+            &animation(&body),
+            &table(4),
+        );
+        let rgb = decode(&data, (group * 3 - 1) as i16, 1, Limits::default()).unwrap();
+        let expected: Vec<u8> = (0..group * 3 - 1)
+            .flat_map(|i| [([1, 2, 3, 0][i as usize % 4]), 0, 0])
+            .collect();
+        assert_eq!(rgb, expected);
+        let data = payload(b"rle ", group * 2, 1, depth, &animation(&body), &table(4));
+        assert_eq!(
+            decode(&data, (group * 2) as i16, 1, Limits::default())
+                .unwrap_err()
+                .code,
+            ErrorCode::Malformed
+        );
+    }
+}
+
+#[test]
+fn monochrome_animation_uses_explicit_row_and_command_pairs() {
+    let packet = animation(&[
+        0x80, 1, 0xaa, 0xaa, 0, 255, 0, 1, 0x55, 0x55, 0x80, 254, 0xff, 0xff, 0, 0,
+    ]);
+    let data = payload(b"rle ", 32, 2, 1, &packet, &table(2));
+    let rgb = decode(&data, 32, 2, Limits::default()).unwrap();
+    let expected: Vec<u8> = (0..64)
+        .flat_map(|i| {
+            [
+                if i >= 32 || (i < 16 && i % 2 == 0) || ((16..32).contains(&i) && i % 2 == 1) {
+                    1
+                } else {
+                    0
+                },
+                0,
+                0,
+            ]
+        })
+        .collect();
+    assert_eq!(rgb, expected);
+    let limits = Limits {
+        max_operations: 2,
+        ..Default::default()
+    };
+    assert_eq!(
+        decode(&data, 32, 2, limits).unwrap_err().code,
+        ErrorCode::ResourceLimit
+    );
+}
+
+#[test]
+fn packed_animation_never_supplies_previous_frame_pixels() {
+    for body in [
+        vec![0x81, 1, 0, 0, 0, 0],
+        vec![0x80, 255, 0, 0],
+        vec![0x80, 1, 0, 0, 0x80, 255, 0, 0],
+        vec![0x80, 1, 0, 0, 1, 1, 0, 0, 0, 0],
+    ] {
+        let data = payload(b"rle ", 32, 1, 1, &animation(&body), &table(2));
+        assert_eq!(
+            decode(&data, 32, 1, Limits::default()).unwrap_err().code,
+            ErrorCode::Unsupported
+        );
+    }
+    for depth in [2, 4, 8] {
+        for body in [&[2, 255, 0][..], &[1, 255, 0], &[1, 0, 2, 255, 0]] {
+            let data = payload(b"rle ", 16, 1, depth, &animation(body), &table(4));
+            assert_eq!(
+                decode(&data, 16, 1, Limits::default()).unwrap_err().code,
+                ErrorCode::Unsupported
+            );
+        }
+    }
+}
+
+#[test]
+fn packed_packets_are_bounded_and_reject_truncation_flags_and_trailing_bytes() {
     let fixtures: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/quicktime-blocks.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/quicktime-packed.json")).unwrap();
     for case in fixtures["cases"].as_array().unwrap() {
         let codec: &[u8; 4] = case["codec"]
             .as_str()
@@ -74,21 +262,75 @@ fn independently_encoded_stills_match_ffmpeg_decoded_pixels() {
             .unwrap();
         let width = case["width"].as_u64().unwrap() as u16;
         let height = case["height"].as_u64().unwrap() as u16;
-        let data = payload(
-            codec,
-            width,
-            height,
-            case["depth"].as_u64().unwrap() as u16,
-            &unhex(case["packet"].as_str().unwrap()),
-            &unhex(case["palette"].as_str().unwrap()),
-        );
-        let rgb = decode(&data, width as i16, height as i16, Limits::default()).unwrap();
+        let depth = case["depth"].as_u64().unwrap() as u16;
+        let packet = unhex(case["packet"].as_str().unwrap());
+        let palette = unhex(case["palette"].as_str().unwrap());
+        for len in 0..packet.len() {
+            if codec == b"rle " && depth != 1 && len == packet.len() - 1 {
+                continue;
+            } // Optional final byte.
+            let mut truncated = packet[..len].to_vec();
+            if codec == b"rle " && len >= 4 {
+                truncated[..4].copy_from_slice(&(len as u32).to_be_bytes());
+            }
+            let data = payload(codec, width, height, depth, &truncated, &palette);
+            assert!(
+                decode(&data, width as i16, height as i16, Limits::default()).is_err(),
+                "{} length {len}",
+                case["name"]
+            );
+        }
+        let mut extra = packet.clone();
+        extra.push(42);
+        if codec == b"rle " {
+            extra[..4].copy_from_slice(&((packet.len() + 1) as u32).to_be_bytes());
+        }
+        let data = payload(codec, width, height, depth, &extra, &palette);
+        assert!(decode(&data, width as i16, height as i16, Limits::default()).is_err());
+        let data = payload(codec, width, height, depth, &packet, &palette);
+        let mut alpha = data.clone();
+        alpha[54..56].copy_from_slice(&256u16.to_be_bytes());
         assert_eq!(
-            rgb,
-            unhex(case["rgb"].as_str().unwrap()),
-            "{}",
-            case["name"]
+            decode(&alpha, width as i16, height as i16, Limits::default())
+                .unwrap_err()
+                .code,
+            ErrorCode::Unsupported
         );
+        assert_eq!(
+            decode(
+                &data,
+                width as i16,
+                height as i16,
+                Limits {
+                    max_pixels: 1,
+                    ..Default::default()
+                }
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::ResourceLimit
+        );
+        if codec == b"rle " {
+            let mut update = packet.clone();
+            update[4..6].copy_from_slice(&8u16.to_be_bytes());
+            update.splice(6..6, words(&[0, 0, height as i16, 0]));
+            let size = update.len();
+            update[..4].copy_from_slice(&(size as u32).to_be_bytes());
+            let data = payload(codec, width, height, depth, &update, &palette);
+            assert_eq!(
+                decode(&data, width as i16, height as i16, Limits::default()).unwrap(),
+                unhex(case["rgb"].as_str().unwrap())
+            );
+            let mut flags = packet.clone();
+            flags[4] = 0x80;
+            let data = payload(codec, width, height, depth, &flags, &palette);
+            assert_eq!(
+                decode(&data, width as i16, height as i16, Limits::default())
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Unsupported
+            );
+        }
     }
 }
 
