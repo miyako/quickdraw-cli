@@ -1,0 +1,269 @@
+{
+  "schema": 1,
+  "provenance": "Original repository PICT/font artwork; converter PNGs with separately added labels, not a historical oracle.",
+  "examples": [
+    {
+      "id": "01",
+      "title": "Shape verbs",
+      "profile": "CORE",
+      "pict_sha256": "33c808cb9dfa5580ddbd01cc785385c464f304ca8766b8c1b0d0205aecd82a63",
+      "png_sha256": "98c550b9562985f52d944f381f434c62ae15a7df6cd4320de6a4669001afebea",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "title": "Curves and polygons",
+      "profile": "PORTABLE",
+      "pict_sha256": "6c7ef631ac42e8ef32ca55cc4dcd866b60a9fc9e984c9c84227aa5c1a4c5a01b",
+      "png_sha256": "3ec77b6599642dc985c227ba225bf32599855627080c01a7fd4c82c22eb8ce59",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        },
+        {
+          "code": "approximation",
+          "message": "curve/polygon/complex region outline uses portable coverage",
+          "offset": 54
+        },
+        {
+          "code": "approximation",
+          "message": "curve/polygon/complex region outline uses portable coverage",
+          "offset": 72
+        },
+        {
+          "code": "approximation",
+          "message": "curve/polygon/complex region outline uses portable coverage",
+          "offset": 90
+        },
+        {
+          "code": "approximation",
+          "message": "curve/polygon/complex region outline uses portable coverage",
+          "offset": 112
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "title": "Pens and lines",
+      "profile": "PORTABLE",
+      "pict_sha256": "efb913c309584eb40d9ca86be8cdb0f9d0bd0accab2f71390f81e5964cced841",
+      "png_sha256": "9430d219759e4994fc08104c49884134f473658d9054245a3274ca9412dca8a2",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        },
+        {
+          "code": "approximation",
+          "message": "diagonal line uses integer Bresenham coverage",
+          "offset": 70
+        },
+        {
+          "code": "approximation",
+          "message": "diagonal line uses integer Bresenham coverage",
+          "offset": 96
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "title": "Patterns",
+      "profile": "CORE",
+      "pict_sha256": "0a6d85dcedcfdccc0cd240d9ad113a03e49321c5accea3e4f01b7058e375ddae",
+      "png_sha256": "81dc1c85c2cdfbc679f7bc453bd9d2218f5dc902ada1278a87f1448461ed39f1",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        }
+      ]
+    },
+    {
+      "id": "05",
+      "title": "Regions and clipping",
+      "profile": "CORE",
+      "pict_sha256": "fb9e4bbd7fd227d9957f4b1089fce9ef4f983986d7da9c05df0b607fbfd6d3f1",
+      "png_sha256": "9f4fd685472f7634f08c7c73fafe739bdaa9e79a69d7aa457d0e0b18d602b003",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        }
+      ]
+    },
+    {
+      "id": "06",
+      "title": "Origin and saved geometry",
+      "profile": "CORE",
+      "pict_sha256": "934ad5550870eba7ff2378a2e5be2847cfe4ad4a71845eeea7e8c59a7b54112e",
+      "png_sha256": "718b3866bda6ca17089aeb262714d22d94a6e5e4d2ce1798931d3cabc69b768f",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        }
+      ]
+    },
+    {
+      "id": "07",
+      "title": "Ordered Boolean transfers",
+      "profile": "CORE",
+      "pict_sha256": "4ab0d444872117d1e0f21f544c17acc5e5162c31c6ef89313a64eabcec5264c5",
+      "png_sha256": "f06947ce228c57a134ed5345f4dadf418602739447eb6681eee169d8e5baca31",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        }
+      ]
+    },
+    {
+      "id": "08",
+      "title": "Arithmetic and highlight",
+      "profile": "CORE",
+      "pict_sha256": "e5cd12e09f2cd1bfb4965f15f2bf4255e0e013f94ef6e32b8d51cc84698f468a",
+      "png_sha256": "6d312b15e2c8ab7017a07d3cd71fb2c9d1a2c45ca669e6cc1e6cfa4a390d42c2",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        }
+      ]
+    },
+    {
+      "id": "09",
+      "title": "Bitmaps and PixMaps",
+      "profile": "CORE",
+      "pict_sha256": "86a6673c336bf64172027994dc8b64ccd37c902941ec6f7f9b9080566369a100",
+      "png_sha256": "33e41a16d0c4b57f8013a87eef9b621ae763adee461978ee6e9b7be7f598abd7",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        }
+      ]
+    },
+    {
+      "id": "10",
+      "title": "Bitmap font layout",
+      "profile": "PORTABLE",
+      "pict_sha256": "e4c4c6da9bd7883749d8c1d04d75296bc516f899b8e6cc947869f95135ae07a7",
+      "png_sha256": "682bc98854a6d603a199219bffb09148fe679671292ad9bcec9b3fd04bbb8745",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        },
+        {
+          "code": "approximation",
+          "message": "text uses portable fixed-point layout/nearest-neighbor scaling or whole-run compositing, not historical Font Manager/stack-dependent rendering",
+          "offset": 66
+        },
+        {
+          "code": "explicit_bitmap_font",
+          "message": "NFNT id=7, size=3, face=0; exact caller-supplied binding, no substitution",
+          "offset": 66
+        },
+        {
+          "code": "approximation",
+          "message": "text uses portable fixed-point layout/nearest-neighbor scaling or whole-run compositing, not historical Font Manager/stack-dependent rendering",
+          "offset": 90
+        },
+        {
+          "code": "explicit_bitmap_font",
+          "message": "NFNT id=7, size=3, face=0; exact caller-supplied binding, no substitution",
+          "offset": 90
+        }
+      ]
+    },
+    {
+      "id": "11",
+      "title": "Portable outline fonts",
+      "profile": "PORTABLE",
+      "pict_sha256": "ce0a864ac44cb9ce437a154695d3d6789cb9d0abd9e36acba425e0c5fbd6bce7",
+      "png_sha256": "a9644138a0719134dff98083c9e2842c52f0571b48534968bab6a754a0453925",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        },
+        {
+          "code": "approximation",
+          "message": "portable_outline_v1: explicit MacRoman/static TrueType shaping, unhinted outline coverage; not classic Font Manager mapping or device fidelity",
+          "offset": 56
+        },
+        {
+          "code": "explicit_outline_font",
+          "message": "portable_outline_v1 MacRoman id=8, size=48, face=0; exact caller-supplied binding, no substitution",
+          "offset": 56
+        },
+        {
+          "code": "approximation",
+          "message": "portable_outline_v1: explicit MacRoman/static TrueType shaping, unhinted outline coverage; not classic Font Manager mapping or device fidelity",
+          "offset": 80
+        },
+        {
+          "code": "explicit_outline_font",
+          "message": "portable_outline_v1 MacRoman id=9, size=48, face=0; exact caller-supplied binding, no substitution",
+          "offset": 80
+        }
+      ]
+    },
+    {
+      "id": "12",
+      "title": "QuickTime still images",
+      "profile": "PORTABLE",
+      "pict_sha256": "1fca2fe07c3074ec2ccb180e064c4e0b887b865dd89f48804038d7c0db0184a5",
+      "png_sha256": "a6b5227d8d32dce6851acbc6340922db70fb773ce55f4bd24ed100535fd6851b",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        },
+        {
+          "code": "embedded_still_image",
+          "message": "Embedded still decoded with explicit transfer mode; no historical codec/color-profile fidelity is claimed.",
+          "offset": 58
+        },
+        {
+          "code": "approximation",
+          "message": "QuickTime uses portable inverse pixel-center affine sampling and/or quantized OpColor/alpha composition, not historical device rendering",
+          "offset": 58
+        }
+      ]
+    },
+    {
+      "id": "13",
+      "title": "Opt-in printer comments",
+      "profile": "PRINTER",
+      "pict_sha256": "38195eeb639e88c2b4a1dfd6f4eff452ca353b0b06322990de71218cf367172f",
+      "png_sha256": "6696d6c093751918597ac4144c94b54f9a24ad6ddc7097dd3d2718273fef78ca",
+      "diagnostics": [
+        {
+          "code": "unverified_fidelity",
+          "message": "Portable RGB raster profile; no classic Mac rendering oracle or historical fonts were used to validate pixel identity."
+        },
+        {
+          "code": "portable_printer_comments",
+          "message": "Explicit Apple printer-comment subset: no classic-screen/driver equivalence, font substitution or PostScript execution; raster uses pixel-center coverage before final resampling."
+        },
+        {
+          "code": "approximation",
+          "message": "portable_outline_v1: explicit MacRoman/static TrueType shaping, unhinted outline coverage; not classic Font Manager mapping or device fidelity",
+          "offset": 86
+        },
+        {
+          "code": "explicit_outline_font",
+          "message": "portable_outline_v1 MacRoman id=8, size=48, face=0; exact caller-supplied binding, no substitution",
+          "offset": 86
+        }
+      ]
+    }
+  ]
+}

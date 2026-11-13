@@ -1,0 +1,66 @@
+name: Native tests and CLI assets
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            binary: quickdraw
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: quickdraw
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary: quickdraw.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+      - name: Install pinned native Rust toolchain
+        run: |
+          rustup toolchain install 1.91.0 --profile minimal --component rustfmt --component clippy
+          rustc -vV
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+      - name: Format, lint and test
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --all-targets
+          python scripts/test_assets.py
+          python -m pip install -r scripts/requirements-test.txt
+          python scripts/test_documents.py
+      - name: Build locked release binary
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+      - name: Package twice and verify integrity and reproducibility
+        run: |
+          python scripts/package.py --target "${{ matrix.target }}" --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" --output dist/first
+          python scripts/package.py --target "${{ matrix.target }}" --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" --output dist/second
+          cmp dist/first/*.zip dist/second/*.zip
+          for archive in dist/first/*.zip; do
+            hash=$(cut -d ' ' -f 1 "$archive.sha256")
+            python scripts/verify_asset.py "$archive" --target "${{ matrix.target }}" --sha256 "$hash"
+          done
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: quickdraw-${{ matrix.target }}
+          path: dist/first/*
+          if-no-files-found: error
+          retention-days: 30

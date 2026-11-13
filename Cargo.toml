@@ -1,0 +1,40 @@
+[package]
+name = "quickdraw-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Bounded, portable QuickDraw PICT interpreter and conversion CLI"
+license = "MIT"
+repository = "https://github.com/miyako/quickdraw-cli"
+
+[lib]
+name = "quickdraw"
+path = "src/lib.rs"
+
+[[bin]]
+name = "quickdraw"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+same-file = "1"
+tempfile = "3"
+jpeg-decoder = { version = "0.3", default-features = false }
+rustybuzz = "0.20.1"
+gif = "0.13.3"
+tiff = { version = "0.10.3", default-features = false, features = ["deflate", "lzw"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+weezl = "0.1.12"
+
+[dev-dependencies]
+jpeg-encoder = "0.6"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
