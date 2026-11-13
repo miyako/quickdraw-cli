@@ -357,6 +357,7 @@ pub fn export_vector(
         pdf,
         &mut budget,
     )?;
+    let mut outline_clip_id = picture.operations.len() + 1;
     for (index, op) in picture.operations.iter().enumerate() {
         let result = (|| {
             budget.work(1)?;
@@ -514,7 +515,7 @@ pub fn export_vector(
                         ],
                         _ => {
                             return Err(unsupported(
-                                "this NFNT text mode requires destination pixels; use explicit whole-picture raster",
+                                "this text mode requires destination pixels; use explicit whole-picture raster",
                             ));
                         }
                     };
@@ -522,6 +523,115 @@ pub fn export_vector(
                         colors[1] = None;
                     }
                     let viewport = picture.frame.translated(state.origin)?;
+                    if let Some(outline) = &run.outline {
+                        if matches!(state.text.base_mode(), 5 | 7) {
+                            return Err(unsupported(
+                                "inverse outline background coverage requires explicit whole-picture raster",
+                            ));
+                        }
+                        let mut area = outline.bounds.intersect(viewport);
+                        if state.text.masked() {
+                            area.right = area.right.min(outline.advance_right);
+                        }
+                        let mut outline_clip = Path::default();
+                        if let Some(region) = state.clip {
+                            // Clip intersections are emitted as bounded row rectangles,
+                            // while glyph geometry remains continuous outline curves.
+                            budget.work((area.width() * area.height()) as u64)?;
+                            for y in area.top..area.bottom {
+                                let mut x = area.left;
+                                while x < area.right {
+                                    if !region.contains(x, y) {
+                                        x += 1;
+                                        continue;
+                                    }
+                                    let start = x;
+                                    while x < area.right && region.contains(x, y) {
+                                        x += 1;
+                                    }
+                                    outline_clip.rect(
+                                        Rect {
+                                            left: start,
+                                            right: x,
+                                            top: y,
+                                            bottom: y + 1,
+                                        },
+                                        &mut budget,
+                                    )?;
+                                }
+                            }
+                        } else {
+                            outline_clip.rect(area, &mut budget)?;
+                        }
+                        let delta = (-(viewport.left as i64), -(viewport.top as i64));
+                        if let Some(background) = colors[1] {
+                            let mut background_path = Path::default();
+                            background_path.rect(area, &mut budget)?;
+                            emit(
+                                &mut content,
+                                &background_path,
+                                Some(&outline_clip),
+                                background,
+                                delta,
+                                outline_clip_id,
+                                pdf,
+                                &mut budget,
+                            )?;
+                            outline_clip_id += 1;
+                        }
+                        if let Some(foreground) = colors[0] {
+                            for glyph in &outline.glyphs {
+                                let mut glyph_path = Path::default();
+                                let mut point = [0.0; 2];
+                                for segment in glyph {
+                                    use crate::outline::OutlineSegment as S;
+                                    let s = match *segment {
+                                        S::Move(p) => {
+                                            point = p;
+                                            Segment::Move(p[0], p[1])
+                                        }
+                                        S::Line(p) => {
+                                            point = p;
+                                            Segment::Line(p[0], p[1])
+                                        }
+                                        S::Quad([q, p]) => {
+                                            let a = [
+                                                point[0] + (q[0] - point[0]) * 2.0 / 3.0,
+                                                point[1] + (q[1] - point[1]) * 2.0 / 3.0,
+                                            ];
+                                            let b = [
+                                                p[0] + (q[0] - p[0]) * 2.0 / 3.0,
+                                                p[1] + (q[1] - p[1]) * 2.0 / 3.0,
+                                            ];
+                                            point = p;
+                                            Segment::Curve([a[0], a[1], b[0], b[1], p[0], p[1]])
+                                        }
+                                        S::Curve([a, b, p]) => {
+                                            point = p;
+                                            Segment::Curve([a[0], a[1], b[0], b[1], p[0], p[1]])
+                                        }
+                                        S::Close => Segment::Close,
+                                    };
+                                    glyph_path.add(s, &mut budget)?;
+                                }
+                                emit(
+                                    &mut content,
+                                    &glyph_path,
+                                    Some(&outline_clip),
+                                    foreground,
+                                    delta,
+                                    outline_clip_id,
+                                    pdf,
+                                    &mut budget,
+                                )?;
+                                outline_clip_id += 1;
+                            }
+                        }
+                        diagnostics
+                            .push(crate::raster::font_diagnostic(&state, options, op.offset));
+                        state.highlight = false;
+                        return Ok(());
+                    }
                     let mask = run.mask(viewport, state.text.masked(), &mut budget)?;
                     for (plane, color) in colors.into_iter().enumerate() {
                         let Some(color) = color else { continue };
@@ -564,7 +674,7 @@ pub fn export_vector(
                             &mut budget,
                         )?;
                     }
-                    diagnostics.push(Diagnostic::new("explicit_bitmap_font", format!("NFNT id={}, size={}, face={}; glyph pixel runs, no replacement or outline substitution", state.text.id, state.text.size, state.text.face), Some(op.offset)));
+                    diagnostics.push(crate::raster::font_diagnostic(&state, options, op.offset));
                     state.highlight = false;
                     return Ok(());
                 }

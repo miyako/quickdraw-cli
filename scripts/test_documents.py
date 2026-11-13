@@ -54,6 +54,57 @@ class Documents(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
+    def outline_map(self):
+        font = Path(__file__).resolve().parent.parent / "tests/fixtures/portable-outline.ttf"
+        path = self.root / "outline.json"
+        path.write_text(json.dumps({"schema":1,"fonts":[{"id":7,"size":10,"path":str(font),
+                                                      "outline":{"face_index":0,"encoding":"macroman","kerning":True}}]}))
+        return ("--font-map",str(path),"--fidelity","approximate")
+
+    def test_outline_shaping_spacing_masks_and_clips_match_independent_pdf(self):
+        extra = self.outline_map()
+        for mode in [0,1,3,4,36,64,65,67,68,100]:
+            with self.subTest(mode=mode):
+                ops = [(0x31,words(0,0,24,60)), (3,words(7)), (0x0d,words(10)), (0x15,words(0)),
+                       (5,words(mode)), (0x10,words(2,2,1,1)), (6,struct.pack(">i",32768)),
+                       (0x16,words(1)), (0x0c,words(2,1)), (1,words(10,1,3,21,53)),
+                       (0x28,words(12,2)+b"\x04AV O")]
+                self.compare_pdf_with_raster(ops,frame=(0,0,24,60),extra=extra)
+                result,target = self.convert("svg",operations=ops,frame=(0,0,24,60),extra=extra)
+                self.assertEqual(result.returncode,0,result.stderr)
+                tree = ET.parse(target)
+                ids = [node.get("id") for node in tree.iter() if node.get("id")]
+                self.assertEqual(len(ids),len(set(ids)))
+                self.assertFalse(tree.findall(".//{http://www.w3.org/2000/svg}image"))
+                self.assertFalse(tree.findall(".//{http://www.w3.org/2000/svg}text"))
+                self.assertIn("explicit_outline_font",[d["code"] for d in json.loads(result.stdout)["diagnostics"]])
+
+    def test_outline_curves_remain_cubic_paths_and_render_in_pdfium(self):
+        extra = self.outline_map()
+        ops = [(3,words(7)),(0x0d,words(10)),(0x15,words(0)),(0x28,words(12,2)+b"\x01C")]
+        result,target = self.convert("pdf",operations=ops,frame=(0,0,24,60),extra=extra)
+        self.assertEqual(result.returncode,0,result.stderr)
+        reader = PdfReader(target,strict=True)
+        self.assertIn(b"c",[op for _,op in reader.pages[0].get_contents().operations])
+        self.assertNotIn("/XObject",reader.pages[0]["/Resources"])
+        with closing(pdfium.PdfDocument(str(target))) as document, closing(document[0]) as page, \
+             closing(page.render(scale=2,no_smoothpath=True)) as bitmap:
+            image = bitmap.to_pil().convert("RGB")
+            self.assertEqual(image.getpixel((4,7)),(0,0,0))
+            self.assertEqual(image.getpixel((0,7)),(255,255,255))
+            self.assertEqual(image.getpixel((4,13)),(255,255,255))
+
+    def test_outline_destination_modes_require_whole_composite_fallback(self):
+        extra=self.outline_map()
+        for mode in [2,5,7,32,38,66]:
+            with self.subTest(mode=mode):
+                ops=[(0x31,words(0,0,24,60)),(3,words(7)),(0x0d,words(10)),(0x15,words(0)),
+                     (0x1f,words(16384,16384,16384)),(5,words(mode)),
+                     (0x16,words(-7)),(0x28,words(12,2)+b"\x02AA")]
+                result,_=self.convert("pdf",operations=ops,frame=(0,0,24,60),extra=extra)
+                self.assertEqual(result.returncode,5,result.stderr)
+                self.compare_pdf_with_raster(ops,frame=(0,0,24,60),extra=extra,policy="raster")
+
     def test_legacy_block_codecs_match_reference_and_preserve_affine_masked_layers(self):
         cases = json.loads((Path(__file__).resolve().parent.parent / "tests/fixtures/quicktime-blocks.json").read_text())["cases"]
         for case in cases:

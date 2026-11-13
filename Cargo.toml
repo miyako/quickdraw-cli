@@ -25,6 +25,7 @@ sha2 = "0.10"
 same-file = "1"
 tempfile = "3"
 jpeg-decoder = { version = "0.3", default-features = false }
+rustybuzz = "0.20.1"
 
 [dev-dependencies]
 jpeg-encoder = "0.6"

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use quickdraw::{Container, Error, ErrorCode, Fidelity, Limits, RenderOptions, Result};
 use serde::Deserialize;
@@ -176,6 +178,7 @@ struct FontBinding {
     container: Option<Container>,
     resource: Option<quickdraw::FontResourceSelection>,
     family: Option<quickdraw::FontFamilySelection>,
+    outline: Option<quickdraw::OutlineSelection>,
 }
 fn load_fonts(
     path: Option<&Path>,
@@ -232,6 +235,19 @@ fn load_fonts(
         let font_path = path.parent().unwrap_or(Path::new(".")).join(binding.path);
         output_path(&font_path, output, true)?;
         let bytes = read(&font_path)?;
+        if let Some(selection) = binding.outline {
+            if binding.container.is_some() || binding.resource.is_some() || binding.family.is_some()
+            {
+                return Err(Error::new(
+                    ErrorCode::InvalidArguments,
+                    "outline and bitmap container/resource/family selectors are mutually exclusive",
+                ));
+            }
+            let font = quickdraw::OutlineFont::parse(&bytes, selection, limits)?;
+            book.insert_outline(binding.id, binding.size, binding.face, font, limits)?;
+            sources.push(font_path);
+            continue;
+        }
         let font = if let Some(container) = binding.container {
             quickdraw::BitmapFont::from_container(
                 &bytes,
@@ -381,6 +397,8 @@ fn capabilities() -> Value {
         "vector_profile": "portable_paths_v1",
         "font_map_schema": 1,
         "text_profile": "portable_nfnt_v1",
+        "outline_profile": "portable_outline_v1",
+        "outline_fonts": {"container":["sfnt","ttc"],"outlines":"static_truetype_glyf","encoding":"macroman_post_8_5","face_index":"explicit","shaping":"rustybuzz_latin_ltr_und","kerning":"explicit_opt_in","ligatures":"liga_clig_dlig_disabled","classic_fidelity":false},
         "text_modes": {"base": [0,1,2,3,4,5,6,7,32,33,34,35,36,37,38,39], "mask_flag":64},
         "containers": ["auto", "raw", "file", "resource-fork", "macbinary", "appledouble", "applesingle"],
         "font_resource_types": ["NFNT", "FONT", "FOND"],
@@ -427,7 +445,7 @@ fn capabilities() -> Value {
         ],
         "approximate_only": ["ovals", "rounded_rectangles", "arcs", "polygons", "diagonal_lines", "complex_region_outlines", "printer_comments", "color_bitmap_boolean_modes", "text_scaling_fractional_layout_extended_modes", "quicktime_extended_affine_and_alpha"],
         "unsupported": [
-            "implicit_system_fonts", "outline_fonts", "multibyte_text", "color_nfnt",
+            "implicit_system_fonts", "classic_outline_mapping", "cff_variable_color_aat_fonts", "multibyte_text", "color_nfnt",
             "script_specific_line_justification", "nonpositive_or_disabled_text_scaling",
             "grayishTextOr_not_recorded_in_pict", "fond_synthetic_styles_and_legacy_negative_fixed",
             "dithering", "default_system_highlight_without_explicit_color",
@@ -604,6 +622,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 "resource_id":picture.resource_id(),
                 "raster_profile":if args.vector_policy == VectorPolicy::Preserve { Value::Null } else { json!("portable_rgb_v1") },
                 "vector_profile":if args.vector_policy == VectorPolicy::Preserve { json!("portable_paths_v1") } else { Value::Null },
+                "outline_profile":if diagnostics.iter().any(|d|d.code=="explicit_outline_font") { json!("portable_outline_v1") } else { Value::Null },
                 "diagnostics":diagnostics
             }))
         }

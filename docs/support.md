@@ -54,7 +54,8 @@ emits an operation-offset warning for every accepted approximation.
 | SVG / PDF | Explicit whole-picture raster or supported genuine-path policy; PDF 1.4 single page |
 | Native vector subset | Tiled patterns, copied/straight-alpha image layers, shapes/regions and NFNT runs; diagonal/polygon/arc/complex-region frames use shared pixel-run coverage |
 | Remaining embedded-image gaps | Separate matte payloads, projective matrices, other transfer modes, extensions, temporal/skipped-pixel Animation, paletted/grayscale RLE, planar/paletted raw, CMYK/16-bit-channel images; preserved premultiplied alpha needs whole-picture raster |
-| Outline/multibyte/color text, synthetic FOND styles, script-specific justification | Unsupported; no silent substitution; scaling-disabled nonunit ratios and nonpositive ratios fail |
+| Portable outline text | Explicit static TrueType sfnt/TTC face, declared post-8.5 MacRoman, Rustybuzz Latin/LTR shaping, fixed optional features, opt-in kerning, genuine glyph paths; approximate-only |
+| Classic outline/multibyte/color text, synthetic FOND styles, script-specific justification | Unsupported; no silent substitution; scaling-disabled nonunit ratios and nonpositive ratios fail |
 | Classic screen emulation | Not implemented |
 
 ## Raster profile `portable_rgb_v1`
@@ -182,6 +183,20 @@ directory bounds, truncation, duplicate pairs, width precedence/disablement,
 scaled signed pair adjustments, run boundaries, unavailable scripts and resource
 limits. FOND widths/kerning also pass through real CLI PNG/SVG/PDF conversion;
 PDFium comparisons include clipping, origins and text masks.
+Outline fixtures `portable-outline.ttf` and `portable-outline.ttc` are original
+MIT-licensed geometric glyphs, generated with fontTools by
+`scripts/generate_outline_fixtures.py`. They are not extracted system fonts or
+historical samples; the private-use mapping uses an original box, not a logo.
+`tests/outlines.rs` checks declared MacRoman characters, cmap failures,
+explicit collection faces/styles, shaping/kerning/disabled ligatures, spacing,
+ratios, clipping/origins, composite cycle rejection, resource bounds, XOR
+overlap union, genuine curves and source-file protection. Independent PDFium
+checks source-only and masked text modes with scaled/kerning-adjusted outlines;
+curve tests verify cubic PDF geometry and independently rendered interior and
+exterior pixels. Destination modes compare explicit whole-composite fallback.
+Exact PDF/raster comparisons use integral outline edges: PDFium and binary
+pixel-center coverage can choose different edge pixels at fractional boundaries,
+which is an explicit presentation distinction, not an ignored test failure.
 
 The tests' truth tables and selected expected pixels establish the declared
 implementation profile, **not independent rendering fidelity**. The mutation
@@ -264,19 +279,27 @@ jobs is not evidence that Windows tests passed.
 * [QuickDrawViewer](https://github.com/wiesmann/QuickDrawViewer), Apache-2.0:
   region transition interpretation and scope comparison. Its Apple-framework
   printer-style renderer is not this project's cross-platform backend or oracle.
+* [Apple's Roman mapping](https://www.unicode.org/Public/MAPPINGS/VENDORS/APPLE/ROMAN.TXT):
+  post-8.5 byte-to-Unicode semantics, especially the currency/euro distinction.
+* [OpenType specification](https://learn.microsoft.com/en-us/typography/opentype/spec/):
+  sfnt directories, TrueType contours/composites, cmap and shaping tables.
+  [Rustybuzz](https://docs.rs/rustybuzz/0.20.1/rustybuzz/) and its ttf-parser
+  dependency provide portable shaping and contour extraction, not Font Manager
+  emulation. Locked versions and redistribution notices travel with CLI assets.
 
 ## Readiness
 
 This is a usable **defined supported converter**, not a fully capable historical
 QuickDraw backbone. The supported contract is the matrix above plus
-`portable_rgb_v1`, `portable_nfnt_v1`, `portable_paths_v1` and JSON protocol 1.
+`portable_rgb_v1`, `portable_nfnt_v1`, `portable_outline_v1`, `portable_paths_v1`
+and JSON protocol 1.
 The component remains deferred. The gate is a decision about that explicit
 contract, not a requirement to implement every imaginable historical extension.
 
 | Component readiness checklist | Status / gate |
 | --- | --- |
 | Explicit inputs, formats, limits, exit codes, safe outputs and qualified success | Implemented; consumer must preserve originals and diagnostics |
-| Font usability without platform font discovery | Implemented for supplied one-bit raw/container NFNT/FONT and explicit Roman FOND bindings; no fonts shipped |
+| Font usability without platform font discovery | Implemented for supplied NFNT/FONT, explicit Roman FOND, and explicitly declared portable MacRoman/static TrueType outline bindings; no user fonts shipped |
 | Source-only preserved SVG/PDF and safe destination-dependent output | Implemented subset; caller must explicitly choose whole-picture raster where preserved vectors cannot represent the operations |
 | Native executable and reproducible package evidence | Three-target CI verifies macOS ARM64/x64 and Windows x64; gate each selected revision on its actual successful run and verified manifests/hashes |
 | Product acceptance of the supported matrix | Coordinator/user decision remains: accept explicit unsupported outcomes and portable approximations, or identify required additional input features |
@@ -289,7 +312,7 @@ contract, not a requirement to implement every imaginable historical extension.
 | Gap | What can proceed without a historical oracle | Evidence or decision still needed |
 | --- | --- | --- |
 | Remaining family behavior | Documented synthetic-style properties and richer metadata inspection can be implemented if added to the supported contract | Negative version-0/1 values need a resolved representation contract or identified historical samples; current exact intrinsic bindings do not synthesize styles |
-| Outline fonts and encodings | Add explicitly bound sfnt outlines and a documented shaping/encoding contract using established libraries | Source encoding/script and matching licensed font files must be known, not guessed from byte strings or names |
+| Outline fonts and encodings | Portable Roman static TrueType outlines implemented; CFF and other declared encodings can be added independently | Matching fonts and source encoding must be supplied. Classic metrics remain separate; non-Roman language/direction/shaping needs a new explicit contract |
 | Justification | Implement documented simple-script spacing once the input encoding/script contract is explicit | Script identity and representative recorded lineJustify/ChExtra cases; a raw NFNT does not identify a Script Manager environment |
 | Embedded images | Raw/Animation, RPZA, explicitly paletted SMC, affine placement and explicit alpha modes implemented; other codecs, packed paletted variants and OpColor modes remain implementable | Separate PICT matte byte layout, coordinate mapping and mode interaction need a verified specification or provenance-backed samples; movie matte atoms are not sufficient evidence |
 | Preserved vector coverage | Shared diagonal/polygon/arc/complex-region frame paths implemented; destination-dependent operations still require full-composite fallback | Editable continuous geometry versus portable pixel-run presentation remains a fidelity choice; premultiplied source-over needs a representable precision contract before preserved-vector support |
@@ -317,13 +340,11 @@ The separate-matte blocker is specifically the PICT payload layout, coordinate
 mapping, coverage/polarity and transfer-mode interaction, not movie `kmat`
 atom knowledge or a general demand for a historical oracle.
 
-For outline text, a concrete decision is needed before adding an API: permit a
-defined portable Roman profile with explicitly declared MacRoman bytes,
-an exact supplied sfnt/TTC file and face index, and deterministic Unicode/OpenType
-shaping; or require reconstruction of classic Macintosh sfnt mapping and metrics.
-Those are not equivalent layout promises. A portable profile would need explicit
-rules for TxRatio/SpExtra, glyph advances, kerning/features and synthetic faces
-rather than silently replacing current NFNT behavior. Matching lawfully usable
-fonts must be supplied; non-Roman scripts need separate declared encoding,
-language/direction and shaping contracts. No platform font discovery, byte-based
-encoding detection or guessed font substitution is proposed.
+The user selected portable outline text first, with classic fidelity separate.
+That decision is now implemented as the explicit `portable_outline_v1` contract
+in the CLI documentation, without changing NFNT byte-addressed behavior. Matching
+lawfully usable fonts and declared MacRoman input are still required. Remaining
+outline implementation gaps are CFF/variable/color fonts, font resource-container
+selection, synthetic faces and richer layout. Non-Roman scripts and pre-8.5
+currency-sign mappings need explicit encoding/language/direction contracts before
+support; classic Macintosh sfnt mapping and metrics are not claimed by this API.

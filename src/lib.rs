@@ -7,6 +7,7 @@ mod container;
 mod fond;
 mod font;
 mod model;
+mod outline;
 mod output;
 mod parser;
 mod raster;
@@ -23,6 +24,7 @@ pub use font::{
 pub use model::{
     Container, Diagnostic, Error, ErrorCode, Fidelity, Inspection, Limits, Picture, Rect, Result,
 };
+pub use outline::{OutlineEncoding, OutlineFont, OutlineSelection};
 pub use output::{encode_pdf, encode_png, encode_svg};
 pub use parser::parse;
 pub use raster::{Image, RenderOptions, Rendered, render};

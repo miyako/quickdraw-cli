@@ -19,7 +19,9 @@ Graphics (SMC with an explicit embedded palette) still images support bounded
 decoding without temporal-frame guesses. Nonsingular affine placement and recorded straight/premultiplied alpha
 use an explicit portable policy. Separate matte payloads remain unsupported.
 Diagonal pens and polygon/arc/complex-region frames can export shared pixel-run paths.
-Other QuickTime codecs/projective transforms, outline/multibyte text and several
+Explicit portable MacRoman text can use caller-supplied static TrueType sfnt/TTC
+faces with deterministic shaping and genuine SVG/PDF glyph paths. Classic
+outline mapping, multibyte text, other QuickTime codecs/projective transforms and several
 vector modes remain unsupported. Unsupported drawing fails instead of disappearing.
 Classic-Mac pixel fidelity has not been established.
 The separate `miyako/quickdraw` 4D component is not implemented here.

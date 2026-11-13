@@ -415,7 +415,7 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                             canvas.apply(x, y, source, mode, &state);
                         }
                     }
-                    diagnostics.push(Diagnostic::new("explicit_bitmap_font", format!("NFNT id={}, size={}, face={}; caller-supplied identity, no substitution", state.text.id, state.text.size, state.text.face), Some(op.offset)));
+                    diagnostics.push(font_diagnostic(&state, options, op.offset));
                     state.highlight = false;
                 }
                 Command::Draw(verb, shape) => {
@@ -535,6 +535,7 @@ pub(crate) struct PlacedGlyph<'a> {
 }
 
 pub(crate) struct TextRun<'a> {
+    pub outline: Option<crate::outline::OutlineRun>,
     glyphs: Vec<PlacedGlyph<'a>>,
     bounds: Rect,
     advance_right: i32,
@@ -542,7 +543,7 @@ pub(crate) struct TextRun<'a> {
 
 pub(crate) struct TextMask {
     pub bounds: Rect,
-    ink: Vec<u8>,
+    pub(crate) ink: Vec<u8>,
 }
 impl TextMask {
     pub fn ink(&self, x: i32, y: i32) -> bool {
@@ -553,6 +554,9 @@ impl TextMask {
 }
 impl TextRun<'_> {
     pub fn mask(&self, viewport: Rect, masked: bool, budget: &mut Budget<'_>) -> Result<TextMask> {
+        if let Some(outline) = &self.outline {
+            return outline.mask(viewport, masked, budget);
+        }
         let mut bounds = self.bounds.intersect(viewport);
         if masked {
             bounds.right = bounds.right.min(self.advance_right);
@@ -609,8 +613,20 @@ pub(crate) fn text_policy(
     diagnostics: &mut Vec<Diagnostic>,
     offset: usize,
 ) -> Result<()> {
-    state.text.check()?;
-    if state.text.portable_layout() || !matches!(state.text.mode, 1 | 3) {
+    let outline = options
+        .fonts
+        .outline(state.text.id, state.text.size, state.text.face)
+        .is_some();
+    state.text.check_for(outline)?;
+    if outline {
+        require_approximate(
+            options,
+            diagnostics,
+            offset,
+            "portable_outline_v1: explicit MacRoman/static TrueType shaping, unhinted outline coverage; not classic Font Manager mapping or device fidelity",
+        )?;
+    }
+    if !outline && (state.text.portable_layout() || !matches!(state.text.mode, 1 | 3)) {
         require_approximate(
             options,
             diagnostics,
@@ -633,6 +649,36 @@ pub(crate) fn text_policy(
     Ok(())
 }
 
+pub(crate) fn font_diagnostic(
+    state: &State<'_>,
+    options: &RenderOptions,
+    offset: usize,
+) -> Diagnostic {
+    let outline = options
+        .fonts
+        .outline(state.text.id, state.text.size, state.text.face)
+        .is_some();
+    Diagnostic::new(
+        if outline {
+            "explicit_outline_font"
+        } else {
+            "explicit_bitmap_font"
+        },
+        format!(
+            "{} id={}, size={}, face={}; exact caller-supplied binding, no substitution",
+            if outline {
+                "portable_outline_v1 MacRoman"
+            } else {
+                "NFNT"
+            },
+            state.text.id,
+            state.text.size,
+            state.text.face
+        ),
+        Some(offset),
+    )
+}
+
 pub(crate) fn layout_text<'a>(
     state: &mut State<'_>,
     command: &Command,
@@ -647,7 +693,10 @@ pub(crate) fn layout_text<'a>(
     else {
         unreachable!("text command")
     };
-    state.text.check()?;
+    let outline = options
+        .fonts
+        .outline(state.text.id, state.text.size, state.text.face);
+    state.text.check_for(outline.is_some())?;
     let add = |a: i32, b: i32| {
         a.checked_add(b)
             .ok_or_else(|| Error::new(ErrorCode::ResourceLimit, "text coordinate overflow"))
@@ -674,9 +723,23 @@ pub(crate) fn layout_text<'a>(
     if bytes.is_empty() {
         state.pen_location = baseline;
         return Ok(TextRun {
+            outline: None,
             glyphs: Vec::new(),
             bounds,
             advance_right: baseline.x,
+        });
+    }
+    if let Some(font) = outline {
+        let run = font.layout(bytes, baseline, &state.text, budget)?;
+        state.pen_location = Point {
+            x: run.advance_right,
+            y: baseline.y,
+        };
+        return Ok(TextRun {
+            bounds: run.bounds,
+            advance_right: run.advance_right,
+            glyphs: Vec::new(),
+            outline: Some(run),
         });
     }
     let font = options
@@ -732,6 +795,7 @@ pub(crate) fn layout_text<'a>(
         y: baseline.y,
     };
     Ok(TextRun {
+        outline: None,
         glyphs,
         bounds,
         advance_right: state.pen_location.x,

@@ -105,7 +105,7 @@ exist outside the selected payload. The original file is preserved.
 | `--dpi NUMBER` | 72 | Finite, greater than zero and at most 100000; physical metadata only |
 | `--background RRGGBB` | `ffffff` | Opaque initial canvas RGB; six hex digits, no `#` prefix |
 | `--highlight RRGGBB` | unknown | Explicit system highlight color, used when no HiliteColor is in effect and after DefHilite; highlight use without either fails |
-| `--font-map PATH` | none | Schema-1 JSON binding exact source font ID/point size/face to raw or container-selected NFNT/FONT resources; no substitutions |
+| `--font-map PATH` | none | Schema-1 JSON binding exact source font ID/point size/face to NFNT/FONT resources or explicit portable outline faces; no substitutions |
 | `--overwrite` | false | Allow atomic replacement of an unrelated regular output file |
 
 When both dimensions are supplied, output stretches to those dimensions.
@@ -149,11 +149,91 @@ Initial recorded font ID/size are zero unless changed by picture opcodes; no
 host-specific default font or size is invented.
 
 One-bit NFNT/FONT data can be raw or explicitly selected from a resource container.
-No outline font conversion, synthetic styling, substitute-size selection,
+No implicit outline conversion, synthetic styling, substitute-size selection,
 missing-glyph box or substitution is performed. Single-byte codes address glyphs
 directly; no Unicode decoding, Script Manager shaping or multibyte layout is
 implemented. Each use reports `explicit_bitmap_font`. Input limits apply to the map and
 each resource; collection bytes and binding count are also bounded.
+
+### Explicit portable outline fonts
+
+```json
+{"schema":1,"fonts":[{"id":7,"size":12,"face":0,"path":"fonts/roman.ttf","outline":{"face_index":0,"encoding":"macroman","kerning":false}}]}
+```
+
+This additive schema-1 binding selects `portable_outline_v1`, **not classic
+outline fidelity**. `face_index` and `encoding` are required; `kerning` defaults
+to false. A standalone sfnt requires index 0; a TTC requires the exact in-range
+face index. The profile accepts static TrueType `glyf` outlines with a Unicode
+cmap and OS/2 style/metrics. CFF/CFF2, variable/color/bitmap font formats and AAT
+layout tables are explicitly unsupported. Font resource containers are not
+outline containers in this profile: `outline` cannot be combined with
+`container`, `resource` or `family`. Existing bitmap bindings keep their contract.
+The exact `(id,size,face)` key cannot be duplicated across bitmap and outline
+bindings. Size must be positive; only intrinsic regular/bold/italic style bits
+are accepted, matching the supplied font's OS/2 flags. Underline, outline,
+shadow, condensed/extended and other synthetic face operations are not invented.
+No file is discovered by family name, and no font files are shipped for users.
+
+`encoding:"macroman"` explicitly asserts Apple's **post-Mac OS 8.5** Roman
+mapping, including byte `DB` to U+20AC (euro), `BD` to U+03A9 and `F0` to U+F8FF.
+This does not infer the age or script of the PICT. Pre-8.5 currency-sign variants,
+other Roman localizations and non-Roman/multibyte scripts need another declared
+contract and currently fail if requested. Bytes 00–1F and 7F are rejected.
+Missing Unicode cmap entries, glyph zero, unavailable fonts and invalid face
+indices fail; no fallback box, decomposed missing-character workaround,
+system font or substitute face is supplied.
+
+Each PICT text opcode is shaped independently with locked Rustybuzz/ttf-parser:
+Latin script, left-to-right, language `und`, default variation coordinates and
+no hinting. Standard required/default OpenType shaping and normalization remain
+enabled; optional `liga`, `clig`, `dlig` and `calt` are disabled, and `kern` is
+explicitly off/on according to the binding. Thus separate `f` and `i` do not
+silently become an optional ligature; a declared MacRoman fi character may map
+to its own required glyph. GPOS/GSUB are portable OpenType behavior, not classic
+QuickDraw font metrics. Only monotone horizontal clusters are accepted.
+
+Advances and glyph offsets are scaled from font units by exact recorded TxSize
+and positive TxRatio into 16.16 fixed-point layout. PnLocHFrac sets initial
+horizontal placement. SpExtra applies to byte 20; ChExtra to each other input
+byte, once after the last shaped glyph of its cluster. Spacing is scaled
+horizontally and never carried as kerning across text opcodes. Delta text
+positions still refer to the preceding text start; the graphics pen receives
+the floored advanced position. Font ascender/descender and ink/advance extents
+bound the whole-run text plane. `FractEnable` does not quantize scalable
+outline advances: this profile always retains fractions. `OutlinePreferred`
+can be honored by an explicit outline binding; `PreserveGlyph`, nonzero
+script-specific line justification and disabled nonunit scaling still fail.
+
+All outline use requires `--fidelity approximate`, even at native size. Each use
+reports `explicit_outline_font` and an approximation diagnostic; conversion JSON
+adds `outline_profile:"portable_outline_v1"` when used (otherwise null).
+Raster output samples nonzero-winding glyph contours at pixel centers after
+bounded curve subdivision (1/64-pixel control deviation, depth at most 16).
+Glyph coverage is unioned before whole-run text compositing, so overlaps do not
+cancel under XOR. No grid fitting, antialiasing, classic rounding or screen
+font strike selection is claimed. Existing text transfer modes, text masks,
+origin and clipping apply to that shared run.
+
+Preserved SVG/PDF embeds genuine nonzero-filled glyph paths (quadratics become
+equivalent cubics), **not text nodes, font references, pixel-run stand-ins or
+images**. Each glyph is painted separately to preserve overlap unions. Copy
+modes can paint the bounded background plane first. Supported source-only
+outline modes are 0/4, 1 with black foreground, 3 with white background, and 36,
+optionally masked. Other modes, including inverse background modes 5/7, require
+explicit whole-picture raster fallback. Continuous vector edge coverage can
+differ from binary raster sampling at fractional boundaries; editable outline
+geometry and classic pixel identity are not interchangeable promises.
+
+Input and aggregate font byte limits apply. Selected sfnt directories, loca
+ranges, required tables, composite cycles and expanded glyph complexity are
+checked before shaping. Composite depth is at most 16. Shaping has bounded input
+and output counts, conservative font-by-run work and scratch-byte accounting;
+contours, curve subdivision, pixel-edge tests and serialization consume the
+existing budgets. As with image libraries, internal shaper work/allocations are
+not an interruptible instruction counter or hard RSS guarantee: use a process
+timeout/memory limit for hostile fonts. The font bytes remain explicit protected
+inputs and cannot be overwritten by conversion.
 
 #### Resource containers and FOND families (additive schema 1)
 

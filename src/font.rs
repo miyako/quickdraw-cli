@@ -326,6 +326,7 @@ impl Glyph<'_> {
 #[derive(Clone, Debug, Default)]
 pub struct FontBook {
     fonts: BTreeMap<(i16, u16, u8), BitmapFont>,
+    outlines: BTreeMap<(i16, u16, u8), crate::OutlineFont>,
     bytes: usize,
 }
 impl FontBook {
@@ -347,7 +348,9 @@ impl FontBook {
                 "binding size/style conflicts with selected FOND strike",
             ));
         }
-        if self.fonts.contains_key(&(id, size, face)) {
+        if self.fonts.contains_key(&(id, size, face))
+            || self.outlines.contains_key(&(id, size, face))
+        {
             return Err(Error::new(
                 ErrorCode::InvalidArguments,
                 "duplicate font binding",
@@ -369,11 +372,58 @@ impl FontBook {
         self.bytes = bytes;
         Ok(())
     }
+    pub fn insert_outline(
+        &mut self,
+        id: i16,
+        size: u16,
+        face: u8,
+        font: crate::OutlineFont,
+        limits: &Limits,
+    ) -> Result<()> {
+        limits.validate()?;
+        if size == 0 || face & !3 != 0 {
+            return Err(Error::new(
+                ErrorCode::Unsupported,
+                "outline bindings require a positive size and intrinsic regular/bold/italic face; synthetic styles are unsupported",
+            ));
+        }
+        if face != font.style() {
+            return Err(Error::new(
+                ErrorCode::InvalidArguments,
+                "outline binding style does not match the supplied face",
+            ));
+        }
+        if self.fonts.contains_key(&(id, size, face))
+            || self.outlines.contains_key(&(id, size, face))
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArguments,
+                "duplicate font binding",
+            ));
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(font.byte_len())
+            .filter(|&n| n <= limits.max_decoded_bytes)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::ResourceLimit,
+                    "font collection byte limit exceeded",
+                )
+            })?;
+        self.outlines.insert((id, size, face), font);
+        Ok(())
+    }
+    pub(crate) fn outline(&self, id: i16, size: u16, face: u8) -> Option<&crate::OutlineFont> {
+        self.outlines.get(&(id, size, face))
+    }
     pub(crate) fn get(&self, id: i16, size: u16, face: u8) -> Result<&BitmapFont> {
         self.fonts.get(&(id, size, face)).ok_or_else(|| {
             Error::new(
                 ErrorCode::Unsupported,
-                format!("no explicit NFNT font binding for id={id}, size={size}, face={face}"),
+                format!(
+                    "no explicit NFNT or outline font binding for id={id}, size={size}, face={face}"
+                ),
             )
         })
     }
@@ -392,6 +442,7 @@ pub(crate) struct TextState {
     pub fractional_widths: bool,
     unsupported_justify: bool,
     unsupported_glyphs: bool,
+    preserve_glyphs: bool,
     scaling_disabled: bool,
 }
 impl TextState {
@@ -432,6 +483,7 @@ impl TextState {
                     ));
                 }
                 self.unsupported_glyphs = data[0] != 0;
+                self.preserve_glyphs = data[1] != 0;
                 self.fractional_widths = data[2] != 0;
                 self.scaling_disabled = data[3] != 0;
                 // PreserveGlyph only changes outline glyphs, not an explicit bitmap strike.
@@ -440,21 +492,22 @@ impl TextState {
         }
         Ok(())
     }
-    pub fn check(&self) -> Result<()> {
+    pub fn check_for(&self, outline: bool) -> Result<()> {
         if self.ratio.iter().any(|&n| n <= 0)
             || self.unsupported_justify
-            || self.unsupported_glyphs
+            || (!outline && self.unsupported_glyphs)
+            || (outline && self.preserve_glyphs)
             || (self.scaling_disabled && self.scaled())
         {
             return Err(Error::new(
                 ErrorCode::Unsupported,
-                "NFNT nonpositive/disabled scaling, script-specific justification or outline preference is unsupported",
+                "nonpositive/disabled text scaling, script-specific justification, bitmap outline preference or outline preserveGlyph request is unsupported",
             ));
         }
         if !matches!(self.base_mode(), 0..=7 | 32..=39) || self.mode & !0x7f != 0 {
             return Err(Error::new(
                 ErrorCode::Unsupported,
-                "NFNT text supports source modes 0-7 and 32-39, optionally combined with text mask 64",
+                "text supports source modes 0-7 and 32-39, optionally combined with text mask 64",
             ));
         }
         Ok(())

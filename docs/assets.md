@@ -126,6 +126,11 @@ Protocol 1, archive layout and existing raw-font/opaque-image behavior are uncha
 RPZA and explicitly paletted SMC still decoding are also additive capabilities.
 Their temporal skips, missing caches and unavailable palettes remain errors;
 consumers must not retry by supplying guessed prior pixels or system palettes.
+Schema-1 font maps now optionally select `outline:{face_index,encoding:"macroman",
+kerning:false}` for exact static TrueType sfnt/TTC input. `portable_outline_v1`
+is separately reported and requires approximate fidelity; bitmap bindings and
+protocol 1 remain compatible. Packages include the locked portable shaper/parser
+and their redistribution notices, not platform font dependencies or user fonts.
 
 Archives use sorted members, a fixed 1980 timestamp, explicit Unix permissions,
 canonical JSON and stored (uncompressed) members. Identical binary, source/docs,
