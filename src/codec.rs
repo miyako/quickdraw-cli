@@ -91,6 +91,10 @@ fn jpeg_extent(bytes: &[u8], limits: &Limits) -> Result<()> {
     }
 }
 
+mod blocks;
+
+pub(crate) type Palette = [Option<[u8; 3]>; 256];
+
 pub(crate) struct Decoded {
     pub rgb: Vec<u8>,
     pub alpha: Option<Vec<u8>>,
@@ -158,7 +162,11 @@ fn direct(
         }
         return Ok(image);
     }
-    let mut r = RleReader { bytes, at: 0 };
+    let mut r = RleReader {
+        bytes,
+        at: 0,
+        label: "Animation",
+    };
     let size = u32::from_be_bytes(r.take(4)?.try_into().expect("four bytes"));
     if size & 0xc0000000 != 0 {
         return Err(unsupported("Animation chunk size flags are unsupported"));
@@ -255,6 +263,7 @@ fn direct(
 struct RleReader<'a> {
     bytes: &'a [u8],
     at: usize,
+    label: &'static str,
 }
 impl<'a> RleReader<'a> {
     fn take(&mut self, len: usize) -> Result<&'a [u8]> {
@@ -262,7 +271,7 @@ impl<'a> RleReader<'a> {
             .at
             .checked_add(len)
             .filter(|&n| n <= self.bytes.len())
-            .ok_or_else(|| malformed("truncated Animation data"))?;
+            .ok_or_else(|| malformed(format!("truncated {} data", self.label)))?;
         let result = &self.bytes[self.at..end];
         self.at = end;
         Ok(result)
@@ -283,11 +292,13 @@ pub(crate) fn decode(
     width: usize,
     height: usize,
     depth: u16,
+    palette: Option<&Palette>,
     budget: &mut Budget<'_>,
 ) -> Result<Decoded> {
     let pixels = budget.limits.pixels(width, height)?;
     budget.work(pixels as u64 * 4 + bytes.len() as u64)?;
     match codec {
+        b"rpza" | b"smc " => blocks::decode(codec, bytes, width, height, palette, budget),
         b"raw " | b"rle " => direct(codec, bytes, width, height, depth, budget),
         b"png " => {
             if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -412,7 +423,7 @@ pub(crate) fn decode(
         _ => Err(Error::new(
             ErrorCode::Unsupported,
             format!(
-                "embedded QuickTime codec {codec:02x?} is not implemented (supported: jpeg, png , raw , rle )"
+                "embedded QuickTime codec {codec:02x?} is not implemented (supported: jpeg, png , raw , rle , rpza, smc )"
             ),
         )),
     }

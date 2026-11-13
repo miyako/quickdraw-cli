@@ -695,12 +695,7 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
         return Err(malformed("QuickTime image description too short"));
     }
     q.take(description_size - 4)?;
-    if description_size != 86 {
-        return Err(unsupported(
-            "QuickTime image-description extensions are not implemented",
-        ));
-    }
-    let mut d = Reader::new(&data[at..at + 86], base + at);
+    let mut d = Reader::new(&data[at..at + description_size], base + at);
     d.u32()?;
     let codec = d.take(4)?;
     d.take(8)?;
@@ -725,12 +720,52 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
     let depth = d.u16()?;
     let supported_depth = if matches!(codec, b"raw " | b"rle ") {
         matches!(depth, 16 | 24 | 32)
+    } else if codec == b"rpza" {
+        matches!(depth, 16 | 24)
+    } else if codec == b"smc " {
+        depth == 8
     } else {
         matches!(depth, 8 | 24 | 32 | 40)
     };
-    if !supported_depth || d.u16()? != 0xffff {
+    let table_id = d.u16()?;
+    if !supported_depth || (codec != b"smc " && table_id != 0xffff) {
         return Err(unsupported(
             "QuickTime image depth or external color table not implemented",
+        ));
+    }
+    let palette = if codec == b"smc " {
+        if table_id != 0 {
+            return Err(unsupported(
+                "SMC requires an explicit embedded palette; default/resource color tables are not inferred",
+            ));
+        }
+        d.u32()?;
+        if d.u16()? != 0x8000 {
+            return Err(unsupported(
+                "QuickTime palette requires sequential color-table flags 0x8000",
+            ));
+        }
+        let entries = usize::from(d.u16()?) + 1;
+        if entries > 256 {
+            return Err(malformed("QuickTime palette exceeds 256 colors"));
+        }
+        budget.allocate(std::mem::size_of::<crate::codec::Palette>())?;
+        let mut palette = [None; 256];
+        for entry in &mut palette[..entries] {
+            if d.u16()? != 0 {
+                return Err(unsupported(
+                    "QuickTime palette reserved color value must be zero",
+                ));
+            }
+            *entry = Some(d.color()?);
+        }
+        Some(palette)
+    } else {
+        None
+    };
+    if d.pos != description_size {
+        return Err(unsupported(
+            "QuickTime image-description extensions are not implemented",
         ));
     }
     if compressed_size != data.len() - q.pos {
@@ -778,6 +813,7 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
         width,
         height,
         depth,
+        palette.as_ref(),
         budget,
     )?;
     if mode == 0

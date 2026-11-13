@@ -35,16 +35,16 @@ def picture(operations, frame=(0, 0, 10, 20)):
     return data
 
 
-def quicktime(codec, width, height, depth, encoded, matrix=None, mode=0, mask=b""):
+def quicktime(codec, width, height, depth, encoded, matrix=None, mode=0, mask=b"", palette=b""):
     matrix = matrix or [65536,0,0, 0,65536,0, 0,0,1<<30]
     payload = words(0) + struct.pack(">9i", *matrix) + bytes(12) + words(mode)
     payload += words(0,0,height,width) + bytes(4) + struct.pack(">I",len(mask)) + mask
     description = bytearray(86)
-    struct.pack_into(">I4s", description, 0, 86, codec)
+    struct.pack_into(">I4s", description, 0, 86 + len(palette), codec)
     struct.pack_into(">HH", description, 32, width, height)
     struct.pack_into(">IH", description, 44, len(encoded), 1)
-    struct.pack_into(">Hh", description, 82, depth, -1)
-    payload += description + encoded
+    struct.pack_into(">Hh", description, 82, depth, 0 if palette else -1)
+    payload += description + palette + encoded
     return struct.pack(">I",len(payload)) + payload
 
 
@@ -54,11 +54,40 @@ class Documents(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
+    def test_legacy_block_codecs_match_reference_and_preserve_affine_masked_layers(self):
+        cases = json.loads((Path(__file__).resolve().parent.parent / "tests/fixtures/quicktime-blocks.json").read_text())["cases"]
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                width, height = case["width"], case["height"]
+                encoded, palette = bytes.fromhex(case["packet"]), bytes.fromhex(case["palette"])
+                args = (case["codec"].encode(), width, height, case["depth"], encoded)
+                result, target = self.convert("png", operations=[(0x8200, quicktime(*args, palette=palette))],
+                                              frame=(0,0,height,width))
+                self.assertEqual(result.returncode,0,result.stderr)
+                with Image.open(target) as image:
+                    self.assertEqual(image.convert("RGB").tobytes(),bytes.fromhex(case["rgb"]))
+                if not case["name"].endswith("mixed"):
+                    continue
+                mask = words(0,0,width//2,32767,height,0,width//2,32767,32767)
+                operations = [(0x31,words(0,0,24,24)), (0x0c,words(2,1)),
+                              (1,words(10,1,3,23,21)), (0x1a,words(-1,0,-1)),
+                              (0x8200,quicktime(*args, palette=palette, mask=mask,
+                                  matrix=[-65536,32768,0, 16384,65536,0, 16*65536,32768,1<<30]))]
+                self.compare_pdf_with_raster(operations,frame=(0,0,24,24),extra=("--fidelity","approximate"))
+                result, target = self.convert("svg",operations=operations,frame=(0,0,24,24),
+                                              extra=("--fidelity","approximate"))
+                self.assertEqual(result.returncode,0,result.stderr)
+                tree = ET.parse(target)
+                ns = {"s":"http://www.w3.org/2000/svg"}
+                self.assertTrue(tree.findall(".//s:path",ns))
+                self.assertEqual(len(tree.findall(".//s:image",ns)),1)
+
     def convert(self, extension, policy="preserve", operations=None, extra=(), frame=(0,0,10,20)):
         source, target = self.root / "input.pict", self.root / f"output.{extension}"
         source.write_bytes(picture(operations or [(0x31, words(0, 0, 10, 20))], frame))
         result = subprocess.run([str(BINARY), "convert", "--input", str(source), "--output", str(target),
-                                 "--vector-policy", policy, "--overwrite", "--dpi", "144", *extra],
+                                 *(["--vector-policy", policy] if extension in ("svg", "pdf") else []),
+                                 "--overwrite", "--dpi", "144", *extra],
                                 capture_output=True, check=False)
         return result, target
 

@@ -387,8 +387,11 @@ fn capabilities() -> Value {
         "font_family_scripts": ["roman"],
         "font_family_kerning": "explicit_opt_in_within_text_run",
         "picture_selection": ["unique", "resource_id", "data_fork"],
-        "quicktime_still_codecs": ["jpeg", "png ", "raw ", "rle "],
+        "quicktime_still_codecs": ["jpeg", "png ", "raw ", "rle ", "rpza", "smc "],
         "quicktime_direct_depths": [16,24,32],
+        "quicktime_rpza_depths": [16,24],
+        "quicktime_smc_palette": "depth_8_embedded_id_0_sequential_flags_0x8000_no_default_or_resource_lookup",
+        "quicktime_block_frames": "self_contained_only_no_skips_no_uninitialized_caches",
         "quicktime_modes": [0,256,257,258],
         "quicktime_affine": "nonsingular_16_16_pixel_center_inverse_with_integral_axis_legacy_sampling",
         "quicktime_alpha_vector": "straight_alpha_only_premultiplied_requires_whole_picture_raster",
@@ -400,7 +403,7 @@ fn capabilities() -> Value {
             "approximate": "allow portable curve/polygon/diagonal coverage, extended NFNT layout/compositing and ignored printer comments with diagnostics",
             "classic_oracle_validated": false
         },
-        "supported": [
+        "supported": vec![
             "rectangles", "rectangular_pen", "8x8_patterns", "rgb_colors",
             "rectangular_and_transition_regions", "ordered_boolean_compositing",
             "monochrome_bitmaps", "indexed_1_2_4_8_bit_pixmaps",
@@ -417,6 +420,7 @@ fn capabilities() -> Value {
             "explicit_font_resources", "fond_exact_bitmap_associations_widths_opt_in_kerning",
             "explicit_picture_selection", "embedded_jpeg_png_axis_aligned_srcCopy",
             "quicktime_raw_rgb555_rgb24_argb32", "quicktime_animation_full_frame_direct_rgb",
+            "quicktime_rpza_rgb555_blocks", "quicktime_smc_explicit_palette_blocks",
             "quicktime_affine_rotation_reflection_shear", "quicktime_straight_premultiplied_alpha",
             "vector_bitmap_copy_notCopy_transparent", "vector_tiled_patterns",
             "vector_pixel_run_diagonal_polygon_arc_complex_region_frames"
@@ -432,6 +436,7 @@ fn capabilities() -> Value {
             "other_quicktime_codecs", "quicktime_perspective",
             "quicktime_separate_mattes_extended_descriptions_other_modes",
             "quicktime_animation_delta_skipped_pixels_palettes_grayscale",
+            "quicktime_block_temporal_dependencies_default_resource_palettes",
             "animated_png_cmyk_jpeg_16bit_still_images",
             "classic_screen_pixel_identity"
         ],

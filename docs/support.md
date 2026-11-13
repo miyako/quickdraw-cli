@@ -45,7 +45,7 @@ emits an operation-offset warning for every accepted approximation.
 | Highlight (`1C`-`1E`, modes 50/52/58/60) | Exchanges background/highlight colors, leaves other destination colors intact; one-shot HiliteMode; explicit HiliteColor or CLI highlight required |
 | Transparent pattern mode 44 | Whole-pixel background keying |
 | Dithering / other extended modes | Unsupported; never silently mapped to copy |
-| QuickTime compressed (`8200`) | JPEG/PNG and direct RGB555/RGB24/ARGB32 raw/Animation stills; exact explicit boundaries in CLI contract |
+| QuickTime compressed (`8200`) | JPEG/PNG, direct raw/Animation, RGB555 RPZA and explicitly paletted SMC self-contained stills; exact explicit boundaries in CLI contract |
 | QuickTime affine/alpha | Nonsingular affine rotation/reflection/shear/fractional placement; straight and premultiplied white/black alpha, explicit approximate policy; source mask, clip and origin preserved |
 | QuickTime uncompressed (`8201`) / other codecs | Explicitly unsupported; no silent substitute decoder |
 | Unknown opcodes / unknown length layouts | Fail with offset and opcode; no recovery by guessing |
@@ -163,6 +163,19 @@ remain allowed). Two overlapping partial-alpha layers allow a maximum two
 Local FFmpeg 7.1.1 independently encoded authored RGB24/ARGB32/RGB555BE Animation
 packets, all decoded to the input RGB pixels. This local codec check is not a
 native-CI dependency or a historical decoder oracle.
+`tests/legacy_codecs.rs` also covers RPZA/SMC block operations, partial edges,
+SMC pair/quad/octet selectors, circular cache wrap/reset, current-image repeats,
+truncated operands, palette bounds and absent entries, temporal dependencies,
+alpha rejection and resource limits. `tests/fixtures/quicktime-blocks.json`
+contains twelve original algorithmic images encoded and independently decoded
+by FFmpeg 7.1.1, plus three authored RPZA packets independently decoded by FFmpeg.
+The regeneration procedure and source pixels are specified by
+`scripts/generate_block_fixtures.py`; native CI consumes the checked-in packet
+and expected-RGB data without installing FFmpeg. Lossy RPZA compares against
+the independent decoder's output, not falsely against uncompressed originals.
+CLI PNG checks compare all fifteen reference images exactly. PDFium checks
+RPZA/SMC affine reflections/shears and masked, clipped, origin-adjusted image
+layers over existing drawing; SVG checks preserve surrounding geometry.
 Font-resource fixtures construct original NFNT/FONT/FOND maps and AppleSingle
 entries. Cases cover exact/ambiguous associations, source aliases, optional
 directory bounds, truncation, duplicate pairs, width precedence/disablement,
@@ -213,6 +226,18 @@ jobs is not evidence that Windows tests passed.
 * [MultimediaWiki, Apple QuickTime RLE](https://wiki.multimedia.cx/index.php/Apple_QuickTime_RLE):
   Animation header, row runs, skips and direct-color formats; FFmpeg `qtrleenc.c`
   corroborates direct-color keyframe encoding. No codec implementation copied.
+* [Apple, video sample description](https://developer.apple.com/documentation/quicktime-file-format/video_sample_description)
+  and [color table ID](https://developer.apple.com/documentation/quicktime-file-format/video_sample_description/color_table_id):
+  compression identifiers, depth and embedded-table placement. The
+  [color table fields](https://developer.apple.com/documentation/quicktime-file-format/color_table_atom)
+  define sequential entries, `0x8000` flags, zero reserved values and count-minus-one.
+* [Roberto Togni, RPZA format description](https://multimedia.cx/rpza.txt) and
+  [Mike Melanson, SMC format description](https://multimedia.cx/smc.txt):
+  original published reverse-engineering descriptions of block commands,
+  interpolation and cache selectors, not Apple-authored codec specifications.
+  Implementations here are original; neither their sample code nor third-party
+  implementation code is copied. Independently encoded/decoded fixtures
+  corroborate the supported variants; unknown flags remain unsupported.
 * [Apple, compressed movie matte atom](https://developer.apple.com/documentation/quicktime-file-format/compressed_matte_atom):
   insufficient to establish PICT-specific separate-matte semantics; support
   remains explicitly blocked on that narrower evidence, not on a general oracle.
@@ -266,7 +291,7 @@ contract, not a requirement to implement every imaginable historical extension.
 | Remaining family behavior | Documented synthetic-style properties and richer metadata inspection can be implemented if added to the supported contract | Negative version-0/1 values need a resolved representation contract or identified historical samples; current exact intrinsic bindings do not synthesize styles |
 | Outline fonts and encodings | Add explicitly bound sfnt outlines and a documented shaping/encoding contract using established libraries | Source encoding/script and matching licensed font files must be known, not guessed from byte strings or names |
 | Justification | Implement documented simple-script spacing once the input encoding/script contract is explicit | Script identity and representative recorded lineJustify/ChExtra cases; a raw NFNT does not identify a Script Manager environment |
-| Embedded images | Raw/direct Animation stills, affine placement and explicit alpha modes implemented; other documented codecs and OpColor modes remain implementable | Separate PICT matte byte layout, coordinate mapping and mode interaction need a verified specification or provenance-backed samples; movie matte atoms are not sufficient evidence |
+| Embedded images | Raw/Animation, RPZA, explicitly paletted SMC, affine placement and explicit alpha modes implemented; other codecs, packed paletted variants and OpColor modes remain implementable | Separate PICT matte byte layout, coordinate mapping and mode interaction need a verified specification or provenance-backed samples; movie matte atoms are not sufficient evidence |
 | Preserved vector coverage | Shared diagonal/polygon/arc/complex-region frame paths implemented; destination-dependent operations still require full-composite fallback | Editable continuous geometry versus portable pixel-run presentation remains a fidelity choice; premultiplied source-over needs a representable precision contract before preserved-vector support |
 | Additional containers | Explicit native resource-fork access can build on current extraction; AppleSingle v2 is implemented | Filesystem behavior and deployment policy must be tested per platform |
 | Classic fidelity | Improve specification-backed coverage and differential backend checks now | Pixel equivalence requires an identified OS/QuickDraw/device/font setup, lawful reference outputs and a representative corpus |
@@ -276,3 +301,29 @@ implementation. They do prevent claiming complete legacy behavior. Current
 fractional placement and whole-run compositing remain explicitly portable;
 historical chunk boundaries, cached font data, printer adjustments, global
 pattern phase and implicit system colors/fonts are not reconstructed.
+
+### Ordinary real-file gaps after block-codec support
+
+Without assuming a particular user corpus, useful next implementation work is
+packed/paletted raw and Animation variants, documented default palettes under an
+explicit contract, bounded image-description extensions (including the optional
+zero terminator), other still codecs such as Cinepak/TIFF/GIF, and documented
+OpColor alpha blend. Files depending on previous movie frames cannot become
+self-contained stills without supplying those frames. Native resource-fork
+access remains a deployment convenience beyond the existing portable containers.
+Printer comments, color management and device-specific behavior remain separate
+from successful decoding; unsupported instructions must continue to fail.
+The separate-matte blocker is specifically the PICT payload layout, coordinate
+mapping, coverage/polarity and transfer-mode interaction, not movie `kmat`
+atom knowledge or a general demand for a historical oracle.
+
+For outline text, a concrete decision is needed before adding an API: permit a
+defined portable Roman profile with explicitly declared MacRoman bytes,
+an exact supplied sfnt/TTC file and face index, and deterministic Unicode/OpenType
+shaping; or require reconstruction of classic Macintosh sfnt mapping and metrics.
+Those are not equivalent layout promises. A portable profile would need explicit
+rules for TxRatio/SpExtra, glyph advances, kerning/features and synthetic faces
+rather than silently replacing current NFNT behavior. Matching lawfully usable
+fonts must be supplied; non-Roman scripts need separate declared encoding,
+language/direction and shaping contracts. No platform font discovery, byte-based
+encoding detection or guessed font substitution is proposed.

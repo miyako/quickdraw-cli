@@ -123,6 +123,9 @@ requires approximate fidelity; premultiplied-alpha vector output requires the
 explicit complete-raster policy. Separate matte payloads remain unsupported.
 Diagonal/polygon/arc/complex-region frames now preserve shared pixel-run paths.
 Protocol 1, archive layout and existing raw-font/opaque-image behavior are unchanged.
+RPZA and explicitly paletted SMC still decoding are also additive capabilities.
+Their temporal skips, missing caches and unavailable palettes remain errors;
+consumers must not retry by supplying guessed prior pixels or system palettes.
 
 Archives use sorted members, a fixed 1980 timestamp, explicit Unix permissions,
 canonical JSON and stored (uncompressed) members. Identical binary, source/docs,
