@@ -70,26 +70,38 @@ pub(crate) fn pdf_document(
     content: Vec<u8>,
     image: Option<&Image>,
 ) -> Result<Vec<u8>> {
+    let resources = if image.is_some() {
+        "/XObject << /Im0 5 0 R >>"
+    } else {
+        ""
+    };
+    let mut extra = Vec::new();
+    if let Some(image) = image {
+        extra.push(pdf_stream(&format!("/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8",image.width(),image.height()),image.rgb()));
+    }
+    pdf_objects(width, height, content, resources, extra)
+}
+
+pub(crate) fn pdf_objects(
+    width: f64,
+    height: f64,
+    content: Vec<u8>,
+    resources: &str,
+    extra: Vec<Vec<u8>>,
+) -> Result<Vec<u8>> {
     if width > 14400.0 || height > 14400.0 {
         return Err(Error::new(
             ErrorCode::InvalidArguments,
             "PDF 1.4 page exceeds 14400 points; increase DPI or reduce dimensions",
         ));
     }
-    let resources = if image.is_some() {
-        "/XObject << /Im0 5 0 R >>"
-    } else {
-        ""
-    };
     let mut objects = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.8} {height:.8}] /Resources << {resources} >> /Contents 4 0 R >>").into_bytes(),
         pdf_stream("", &content),
     ];
-    if let Some(image) = image {
-        objects.push(pdf_stream(&format!("/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8", image.width(), image.height()), image.rgb()));
-    }
+    objects.extend(extra);
     let mut bytes = b"%PDF-1.4\n%\xd3\xe4\xf5\xf6\n".to_vec();
     let mut offsets = vec![0];
     for (i, object) in objects.iter().enumerate() {

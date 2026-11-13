@@ -11,7 +11,8 @@ network fetch, font substitution, or side-effecting configuration.
 ```text
 quickdraw --version
 quickdraw capabilities
-quickdraw inspect --input PATH [INPUT OPTIONS]
+quickdraw list-pictures --input PATH [INPUT OPTIONS]
+quickdraw inspect --input PATH [INPUT OPTIONS] [SELECTION OPTIONS]
 quickdraw convert --input PATH --output PATH [INPUT OPTIONS] [CONVERSION OPTIONS]
 quickdraw --help
 quickdraw convert --help
@@ -24,16 +25,16 @@ default limits and exit codes. Help is human-readable text on stdout, exit 0.
 All other commands use the JSON contract below. There is deliberately no inert
 `--json`, system-font-search, or pixel-perfect switch.
 
-### Input options (inspect and convert)
+### Input options (list-pictures, inspect and convert)
 
 | Argument | Default | Behavior |
 | --- | --- | --- |
 | `--input PATH` | required | One regular file; never modified |
-| `--container auto\|raw\|file` | `auto` | `raw`: PICT starts at byte 0; `file`: skip 512 bytes; `auto`: probe version signatures at both offsets, reject ambiguity |
+| `--container auto\|raw\|file\|resource-fork\|macbinary\|appledouble` | `auto` | Explicit layout or unambiguous header detection; no arbitrary signature scan |
 | `--max-input-bytes N` | 67108864 | Maximum file bytes, checked before and during reading |
 | `--max-pixels N` | 16000000 | Maximum frame, bitmap, region, and output pixel count, individually |
 | `--max-decoded-bytes N` | 134217728 | Cumulative decoded/scratch allocation accounting per parsing/rendering/vector phase; also bounds aggregate loaded font bytes |
-| `--max-operations N` | 100000 | Maximum parsed operations (excluding header and EndPic) |
+| `--max-operations N` | 100000 | Maximum parsed operations (excluding header and EndPic); also bounds container tables/resources and PNG/JPEG segment counts |
 | `--max-work N` | 100000000 | Parser input/decoding and renderer coverage work budgets, separately |
 
 Every limit must be positive. Increasing them is an explicit resource decision.
@@ -45,11 +46,47 @@ Parsing and rendering have separate budgets; a successful parse can still exceed
 the rendering budget. Whole-picture rendering precedes output resampling, so a
 small requested output does not bypass the native frame limit.
 
-An extracted resource payload is `raw`, not a resource-fork map.
-MacBinary, AppleDouble, resource maps, multiple pictures in a file and trailing
-data are rejected. No guessed scan for arbitrary embedded signatures is done.
+An extracted resource payload is `raw`, not a resource-fork map. A data-fork PICT
+file with a 512-byte header is `file`. Resource-fork maps, MacBinary I/II/III and
+AppleDouble v2 can contain multiple candidates; selection never silently picks
+the first. Each selected PICT payload must have no trailing data.
 PICT v1 nonzero `picSize` must equal consumed bytes; zero is accepted as unspecified.
 PICT v2 `picSize` is ignored, per the format documentation.
+
+### Container inventory and picture selection
+
+```text
+quickdraw list-pictures --input archive.bin
+quickdraw inspect --input archive.bin --resource-id -128
+quickdraw convert --input archive.bin --data-fork --output picture.png
+```
+
+`list-pictures` returns `{"protocol":1,"inventory":{"container":"macbinary",
+"pictures":[...]}}`. Each entry has `source` (`resource` or `data_fork`),
+`resource_id` (signed integer or null), `name_hex` (original name bytes or null),
+and absolute `offset`/`length` of the PICT payload in the input. Inventory validates
+container structure, not every picture or codec. Resource names are metadata,
+never filesystem paths; no contained files are written.
+
+`--resource-id ID` and `--data-fork` apply only to inspect/convert and are mutually
+exclusive. Without either, exactly one candidate is required. Zero/multiple
+matches fail with exit 2, leaving outputs unchanged. IDs are not ordinal indexes;
+duplicate IDs within a resource type fail as malformed. A MacBinary file can
+contain both a data-fork PICT and PICT resources. `--container` disambiguates the
+outer layout; the selection flags disambiguate its picture.
+
+Resource map/data/reference/name ranges and overlaps are checked. MacBinary II/III
+header CRCs, fork extents and zero fork padding are checked; secondary headers
+and Finder comments are skipped using their declared lengths. Packed MacBinary
+is unsupported. AppleDouble entry IDs/ranges must be nonoverlapping and unique;
+only its resource fork is examined. Its separate data-fork companion is never
+opened implicitly: supply that file itself as another input. AppleSingle and
+automatic access to native filesystem resource-fork streams are not implemented.
+
+Container scanning, selected-picture parsing and rendering have separate budgets.
+The input-byte limit applies to the complete container, not just the selected
+picture. Container metadata, unused resource bodies and available padding may
+exist outside the selected payload. The original file is preserved.
 
 ### Conversion options
 
@@ -119,20 +156,53 @@ each resource; collection bytes and binding count are also bounded.
 
 ### Preserved vector policy
 
-`preserve` emits genuine geometry in `portable_paths_v1`: uniform copy fills,
+`preserve` emits genuine geometry in `portable_paths_v1`: uniform or tiled fills,
 rectangular frames and axis-aligned pens, approximate ellipse/rounded-rectangle
 paths, filled arc sectors/polygons, region runs, and supported NFNT glyph runs.
 Curves/polygons still require `--fidelity approximate`. Region and font paths
 preserve pixel-run edges; they are not smooth outline-font reconstruction or
 searchable PDF text. Overlapping glyph ink uses nonzero fill rather than XOR.
+Bit patterns support patCopy, notPatCopy and transparent; color pixel patterns
+copy directly, independent of pen mode. Native SVG/PDF tiling resources retain
+the original pattern phase through origin changes.
 
-Destination-dependent modes, tiled patterns, bitmap instructions, diagonal
-lines and polygon/arc/complex-region framing currently fail in this backend.
+CopyBits srcCopy, notSrcCopy and transparent placements become embedded images,
+with explicit source/destination/clip masks and nearest-neighbor sampling at
+native picture resolution. Color notSrcCopy still requires approximate fidelity.
+Only the bitmap layer is embedded; preceding/following geometry stays vector.
+Binary image masks become PNG alpha/PDF soft masks, never an unqualified fallback
+for a destination-dependent operation. SVG viewers may differ in honoring
+pixelated image-scaling hints at nonnative display sizes.
+
+Destination-dependent modes, diagonal lines and polygon/arc/complex-region
+framing currently fail in this backend.
 Colored Boolean text also fails unless srcOr foreground is black or srcBic
 background is white. Choose `raster` explicitly to use the complete raster
 interpreter instead. There is no automatic mixed fallback and no transparent
 overlay that loses the preceding destination. Unsupported raster semantics
 still fail under the raster policy.
+
+### Embedded QuickTime still images
+
+Compressed QuickTime opcode `8200` supports `jpeg` and `png ` (the latter FourCC
+ends with a space) through established Rust decoders. Supported records use
+version 0, an 86-byte image description, one frame, no matte or external palette,
+and srcCopy. Positive axis-aligned 16.16 scales/translations are accepted when
+the transformed source edges are integral pixels; projective matrix entries use
+QuickTime's 2.30 representation and must encode an affine transform. Cropped
+source rectangles, source-region transitions, current clip and origin are
+preserved. Decoded RGB is copied directly, not tinted with CopyBits foreground
+and background colors.
+
+Dimensions must match the codec header and fit pixel/byte budgets. JPEG supports
+8-bit RGB/grayscale; PNG supports expanded 8-bit RGB/grayscale and fully opaque
+alpha. Truncated payloads, invalid compressed lengths and trailing image data
+fail. Nonopaque alpha, mattes, rotation/reflection/perspective, fractional edges,
+noncopy QuickTime modes, image-description extensions, CMYK/16-bit JPEG, 16-bit
+PNG, animation, other codecs and opcode `8201` remain unsupported. There is no
+QuickTime runtime, external decoder process, codec guessing or color-profile
+conversion. Decoder-internal work is not a wall-clock guarantee; retain an
+external timeout and process-memory limit for untrusted batches.
 
 ## JSON and exit codes
 
@@ -165,13 +235,16 @@ the wrapper must consider the process exit status as well as parsing JSON.
 The paths, sizes, hashes and dimensions above illustrate shape, not a fixture.
 `output` echoes the supplied path, not necessarily an absolute path.
 Hashes refer to the exact bytes read/written, independent of file timestamps.
+`input_sha256` covers the whole original container; additive `resource_id` is
+the selected PICT ID or null for a data-fork picture.
 For preserved vectors `raster_profile` is null and `vector_profile` is
 `"portable_paths_v1"`; for raster output `vector_profile` is null.
 
 Diagnostics are structured warnings with `code`, `message`, and an optional
 absolute byte `offset`. Codes currently include `unverified_fidelity`,
 `approximation`, `reserved_opcode`, `resampled`, `raster_fallback`,
-`explicit_bitmap_font`, `vector_presentation` and
+`explicit_bitmap_font`, `vector_presentation`, `embedded_bitmap`,
+`embedded_still_image` and
 `unsupported_operation` (inspection). A conversion always includes
 `unverified_fidelity`; exit 0 is **not** an unqualified fidelity guarantee.
 Retain and display warnings rather than discarding them.

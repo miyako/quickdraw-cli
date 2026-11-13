@@ -27,19 +27,48 @@ enum Action {
     /// Convert to PNG, or explicit preserved-vector/raster-backed SVG or PDF.
     Convert(Convert),
     /// Parse and inspect opcodes/comments; does not promise renderability.
-    Inspect(Input),
+    Inspect(Inspect),
+    /// List bounded picture candidates without choosing or rendering one.
+    ListPictures(Input),
     /// Describe the supported subset and versioned machine contract.
     Capabilities,
 }
 #[derive(Args)]
 struct Input {
-    /// Path to a single PICT resource or a 512-byte-header PICT file.
+    /// PICT, resource fork, MacBinary or AppleDouble file; never modified.
     #[arg(long)]
     input: PathBuf,
     #[arg(long, value_enum, default_value = "auto")]
     container: Container,
     #[command(flatten)]
     limits: ResourceLimits,
+}
+#[derive(Args, Default)]
+struct Selection {
+    /// Select an exact signed PICT resource ID, never an ordinal.
+    #[arg(long, allow_hyphen_values = true, conflicts_with = "data_fork")]
+    resource_id: Option<i16>,
+    /// Select the data-fork picture when a container also has PICT resources.
+    #[arg(long)]
+    data_fork: bool,
+}
+impl Selection {
+    fn value(&self) -> quickdraw::PictureSelector {
+        if let Some(id) = self.resource_id {
+            quickdraw::PictureSelector::Resource(id)
+        } else if self.data_fork {
+            quickdraw::PictureSelector::DataFork
+        } else {
+            quickdraw::PictureSelector::Unique
+        }
+    }
+}
+#[derive(Args)]
+struct Inspect {
+    #[command(flatten)]
+    input: Input,
+    #[command(flatten)]
+    selection: Selection,
 }
 #[derive(Args)]
 struct ResourceLimits {
@@ -81,6 +110,8 @@ enum VectorPolicy {
 struct Convert {
     #[command(flatten)]
     input: Input,
+    #[command(flatten)]
+    selection: Selection,
     #[arg(long)]
     output: PathBuf,
     /// Explicit format, otherwise inferred from .png, .svg or .pdf suffix.
@@ -323,7 +354,9 @@ fn capabilities() -> Value {
         "vector_policies": ["reject", "preserve", "raster"],
         "vector_profile": "portable_paths_v1",
         "font_map_schema": 1,
-        "containers": ["auto", "raw", "file"],
+        "containers": ["auto", "raw", "file", "resource-fork", "macbinary", "appledouble"],
+        "picture_selection": ["unique", "resource_id", "data_fork"],
+        "quicktime_still_codecs": ["jpeg", "png "],
         "pict_versions": [1, 2],
         "raster_profile": "portable_rgb_v1",
         "fidelity": {
@@ -340,16 +373,21 @@ fn capabilities() -> Value {
             "origin_changes", "pixel_patterns", "explicit_highlight_color",
             "arithmetic_transfer_modes_32_to_39", "transparent_pattern_mode_44",
             "explicit_nfnt_single_byte_native_size_faces", "text_start_and_pen_advancement",
-            "svg_and_pdf_uniform_copy_geometry", "whole_picture_svg_pdf_raster"
+            "svg_and_pdf_uniform_copy_geometry", "whole_picture_svg_pdf_raster",
+            "bounded_resource_maps", "macbinary_I_II_III", "appledouble_v2",
+            "explicit_picture_selection", "embedded_jpeg_png_axis_aligned_srcCopy",
+            "vector_bitmap_copy_notCopy_transparent", "vector_tiled_patterns"
         ],
         "approximate_only": ["ovals", "rounded_rectangles", "arcs", "polygons", "diagonal_lines", "complex_region_outlines", "printer_comments", "color_bitmap_boolean_modes"],
         "unsupported": [
             "implicit_system_fonts", "outline_fonts", "scaled_or_fractional_text",
             "multibyte_text", "nfnt_optional_tables", "text_modes_other_than_srcOr_srcBic",
             "dithering", "default_system_highlight_without_explicit_color",
-            "vector_destination_modes_tiled_patterns_bitmaps",
+            "vector_destination_dependent_modes",
             "vector_diagonal_polygon_arc_complex_region_frames",
-            "quicktime_codecs", "resource_fork_maps", "macbinary", "appledouble",
+            "other_quicktime_codecs", "quicktime_rotation_reflection_perspective",
+            "quicktime_mattes_alpha_extended_descriptions_noncopy_modes",
+            "animated_png_cmyk_jpeg_16bit_still_images", "applesingle",
             "classic_screen_pixel_identity"
         ],
         "default_limits": Limits::default(),
@@ -371,14 +409,25 @@ fn execute(cli: Cli) -> Result<Value> {
     match cli.command.ok_or_else(|| {
         Error::new(
             ErrorCode::InvalidArguments,
-            "expected convert, inspect, capabilities, --help or --version",
+            "expected convert, inspect, list-pictures, capabilities, --help or --version",
         )
     })? {
         Action::Capabilities => Ok(capabilities()),
-        Action::Inspect(input) => {
-            let bytes = read_input(&input)?;
-            let picture = quickdraw::parse(&bytes, input.container, &input.limits.value())?;
+        Action::Inspect(args) => {
+            let bytes = read_input(&args.input)?;
+            let picture = quickdraw::parse_selected(
+                &bytes,
+                args.input.container,
+                args.selection.value(),
+                &args.input.limits.value(),
+            )?;
             Ok(json!({"protocol":1,"inspection":picture.inspect()}))
+        }
+        Action::ListPictures(input) => {
+            let bytes = read_input(&input)?;
+            Ok(
+                json!({"protocol":1,"inventory":quickdraw::list_pictures(&bytes,input.container,&input.limits.value())?}),
+            )
         }
         Action::Convert(args) => {
             let format = args
@@ -437,7 +486,12 @@ fn execute(cli: Cli) -> Result<Value> {
                 highlight: args.highlight,
                 fonts,
             };
-            let picture = quickdraw::parse(&bytes, args.input.container, &options.limits)?;
+            let picture = quickdraw::parse_selected(
+                &bytes,
+                args.input.container,
+                args.selection.value(),
+                &options.limits,
+            )?;
             let (encoded, width, height, diagnostics) = if args.vector_policy
                 == VectorPolicy::Preserve
             {
@@ -493,6 +547,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 "width":width, "height":height, "dpi":args.dpi,
                 "bytes":encoded.len(), "sha256":format!("{:x}", Sha256::digest(&encoded)),
                 "input_sha256":format!("{:x}", Sha256::digest(&bytes)),
+                "resource_id":picture.resource_id(),
                 "raster_profile":if args.vector_policy == VectorPolicy::Preserve { Value::Null } else { json!("portable_rgb_v1") },
                 "vector_profile":if args.vector_policy == VectorPolicy::Preserve { json!("portable_paths_v1") } else { Value::Null },
                 "diagnostics":diagnostics

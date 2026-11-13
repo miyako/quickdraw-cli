@@ -130,3 +130,112 @@ pub fn nfnt() -> Vec<u8> {
     bytes.extend(words(&[4, 0x0103, 2, -1])); // bearings/advances and terminator
     bytes
 }
+
+pub fn resource_fork(records: &[(i16, Vec<u8>)]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let mut offsets = Vec::new();
+    for (_, bytes) in records {
+        offsets.push(payload.len());
+        payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        payload.extend_from_slice(bytes);
+    }
+    let mut map = vec![0; 38 + records.len() * 12 + 5];
+    map[24..26].copy_from_slice(&28u16.to_be_bytes());
+    map[26..28].copy_from_slice(&((38 + records.len() * 12) as u16).to_be_bytes());
+    map[30..34].copy_from_slice(b"PICT");
+    map[34..36].copy_from_slice(&(records.len() as u16).wrapping_sub(1).to_be_bytes());
+    map[36..38].copy_from_slice(&10u16.to_be_bytes());
+    for (i, (id, _)) in records.iter().enumerate() {
+        let at = 38 + i * 12;
+        map[at..at + 2].copy_from_slice(&id.to_be_bytes());
+        map[at + 5..at + 8].copy_from_slice(&(offsets[i] as u32).to_be_bytes()[1..]);
+    }
+    let names = 38 + records.len() * 12;
+    map[names..].copy_from_slice(b"\x04test");
+    let mut header = Vec::new();
+    for n in [256, 256 + payload.len(), payload.len(), map.len()] {
+        header.extend_from_slice(&(n as u32).to_be_bytes());
+    }
+    map[..16].copy_from_slice(&header);
+    header.resize(256, 0);
+    header.extend(payload);
+    header.extend(map);
+    header
+}
+pub fn macbinary(data: &[u8], resource: &[u8], version: u8) -> Vec<u8> {
+    let mut bytes = vec![0; 128];
+    bytes[1..6].copy_from_slice(b"\x04test");
+    bytes[65..69].copy_from_slice(b"PICT");
+    bytes[83..87].copy_from_slice(&(data.len() as u32).to_be_bytes());
+    bytes[87..91].copy_from_slice(&(resource.len() as u32).to_be_bytes());
+    if version != 0 {
+        bytes[122] = version;
+        bytes[123] = 129;
+        if version == 130 {
+            bytes[102..106].copy_from_slice(b"mBIN");
+        }
+        let mut crc = 0u16;
+        for b in &bytes[..124] {
+            crc ^= (*b as u16) << 8;
+            for _ in 0..8 {
+                crc = if crc & 0x8000 != 0 {
+                    (crc << 1) ^ 0x1021
+                } else {
+                    crc << 1
+                };
+            }
+        }
+        bytes[124..126].copy_from_slice(&crc.to_be_bytes());
+    }
+    bytes.extend_from_slice(data);
+    bytes.resize(bytes.len().next_multiple_of(128), 0);
+    bytes.extend_from_slice(resource);
+    bytes.resize(bytes.len().next_multiple_of(128), 0);
+    bytes
+}
+pub fn appledouble(resource: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![0, 5, 0x16, 7, 0, 2, 0, 0];
+    bytes.extend([0; 16]);
+    bytes.extend(word(1));
+    for n in [2, 38, resource.len()] {
+        bytes.extend_from_slice(&(n as u32).to_be_bytes());
+    }
+    bytes.extend_from_slice(resource);
+    bytes
+}
+
+pub fn quicktime(
+    codec: &[u8; 4],
+    width: u16,
+    height: u16,
+    encoded: &[u8],
+    matrix: [i32; 9],
+    mask: &[u8],
+) -> Vec<u8> {
+    let mut payload = word(0);
+    for n in matrix {
+        payload.extend_from_slice(&n.to_be_bytes());
+    }
+    payload.extend([0; 14]); // no matte, empty matteRect, srcCopy
+    payload.extend(rect(0, 0, height as i16, width as i16));
+    payload.extend([0; 4]);
+    payload.extend_from_slice(&(mask.len() as u32).to_be_bytes());
+    payload.extend_from_slice(mask);
+    let mut desc = vec![0; 86];
+    desc[..4].copy_from_slice(&86u32.to_be_bytes());
+    desc[4..8].copy_from_slice(codec);
+    desc[32..34].copy_from_slice(&width.to_be_bytes());
+    desc[34..36].copy_from_slice(&height.to_be_bytes());
+    desc[44..48].copy_from_slice(&(encoded.len() as u32).to_be_bytes());
+    desc[48..50].copy_from_slice(&1u16.to_be_bytes());
+    desc[82..84].copy_from_slice(&24u16.to_be_bytes());
+    desc[84..86].copy_from_slice(&0xffffu16.to_be_bytes());
+    payload.extend(desc);
+    payload.extend_from_slice(encoded);
+    let mut out = (payload.len() as u32).to_be_bytes().to_vec();
+    out.extend(payload);
+    out
+}
+pub fn identity_matrix() -> [i32; 9] {
+    [65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30]
+}

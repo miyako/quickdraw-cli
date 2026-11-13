@@ -97,6 +97,14 @@ pub enum Container {
     Auto,
     Raw,
     File,
+    #[serde(rename = "resource-fork")]
+    ResourceFork,
+    #[value(name = "macbinary")]
+    #[serde(rename = "macbinary")]
+    MacBinary,
+    #[value(name = "appledouble")]
+    #[serde(rename = "appledouble")]
+    AppleDouble,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, clap::ValueEnum)]
@@ -294,6 +302,35 @@ pub(crate) struct Bitmap {
     pub mode: u16,
     pub mask: Option<Region>,
     pub pixels: Pixels,
+    pub source_mask: Option<Region>,
+    pub raw_copy: bool,
+}
+impl Bitmap {
+    pub fn sample(&self, x: i32, y: i32) -> Option<[u8; 3]> {
+        let dest = self.destination;
+        if !dest.contains(x, y) || self.mask.as_ref().is_some_and(|m| !m.contains(x, y)) {
+            return None;
+        }
+        let sx = self.source.left
+            + (((x as i64 - dest.left as i64) * self.source.width() as i64) / dest.width() as i64)
+                as i32;
+        let sy = self.source.top
+            + (((y as i64 - dest.top as i64) * self.source.height() as i64) / dest.height() as i64)
+                as i32;
+        if self
+            .source_mask
+            .as_ref()
+            .is_some_and(|m| !m.contains(sx, sy))
+        {
+            return None;
+        }
+        let index = (sy - self.bounds.top) as usize * self.bounds.width()
+            + (sx - self.bounds.left) as usize;
+        Some(match &self.pixels {
+            Pixels::Mono(p) => [if p[index] == 0 { 255 } else { 0 }; 3],
+            Pixels::Rgb(p) => [p[index * 3], p[index * 3 + 1], p[index * 3 + 2]],
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -346,6 +383,7 @@ pub(crate) struct Operation {
 
 #[derive(Debug)]
 pub struct Picture {
+    pub(crate) resource_id: Option<i16>,
     pub(crate) frame: Rect,
     pub(crate) version: u8,
     pub(crate) container: Container,
@@ -370,6 +408,7 @@ pub struct InspectedOperation {
 
 #[derive(Serialize)]
 pub struct Inspection {
+    pub resource_id: Option<i16>,
     pub pict_version: u8,
     pub container: Container,
     pub source_offset: usize,
@@ -391,6 +430,9 @@ fn hex(data: &[u8]) -> String {
 }
 
 impl Picture {
+    pub fn resource_id(&self) -> Option<i16> {
+        self.resource_id
+    }
     pub fn frame(&self) -> Rect {
         self.frame
     }
@@ -398,6 +440,7 @@ impl Picture {
     /// Inspect the parsed stream. Successful inspection does not imply renderability.
     pub fn inspect(&self) -> Inspection {
         Inspection {
+            resource_id: self.resource_id,
             pict_version: self.version,
             container: self.container,
             source_offset: self.source_offset,

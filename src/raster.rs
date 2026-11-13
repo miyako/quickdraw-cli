@@ -152,6 +152,14 @@ struct Canvas {
     rgb: Vec<u8>,
 }
 impl Canvas {
+    fn store(&mut self, x: i32, y: i32, rgb: [u8; 3], state: &State<'_>) {
+        if self.frame.contains(x, y) && state.clip.is_none_or(|c| c.contains(x, y)) {
+            let i = ((y - self.frame.top) as usize * self.frame.width()
+                + (x - self.frame.left) as usize)
+                * 3;
+            self.rgb[i..i + 3].copy_from_slice(&rgb);
+        }
+    }
     fn apply(&mut self, x: i32, y: i32, source: [u8; 3], mode: u16, state: &State<'_>) {
         if !self.frame.contains(x, y) || state.clip.is_some_and(|clip| !clip.contains(x, y)) {
             return;
@@ -183,10 +191,7 @@ impl Canvas {
                 let fg = state.foreground[c];
                 let bg = state.background[c];
                 match mode & 3 {
-                    0 => {
-                        ((u32::from(255 - src) * u32::from(fg) + u32::from(src) * u32::from(bg))
-                            / 255) as u8
-                    }
+                    0 => copy_component(src, fg, bg),
                     1 => (src | fg) & dest[c],
                     2 => {
                         if source == [if mode & 4 == 0 { 0 } else { 255 }; 3] {
@@ -212,6 +217,13 @@ impl Canvas {
             self.rgb[i..i + 3].copy_from_slice(&color);
         }
     }
+}
+
+fn copy_component(source: u8, fg: u8, bg: u8) -> u8 {
+    ((u32::from(255 - source) * u32::from(fg) + u32::from(source) * u32::from(bg)) / 255) as u8
+}
+pub(crate) fn copy_color(source: [u8; 3], state: &State<'_>) -> [u8; 3] {
+    std::array::from_fn(|i| copy_component(source[i], state.foreground[i], state.background[i]))
 }
 
 // QuickDraw monochrome logical ink uses one for black; RGB uses zero for black.
@@ -409,6 +421,9 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                     state.highlight = false;
                 }
                 Command::Bitmap(bitmap) => {
+                    if bitmap.raw_copy {
+                        diagnostics.push(Diagnostic::new("embedded_still_image","Embedded still image decoded to opaque RGB; no historical codec/color-profile fidelity is claimed.",Some(op.offset)));
+                    }
                     state.validate(bitmap.mode, false)?;
                     if matches!(bitmap.pixels, Pixels::Rgb(_)) && (1..=7).contains(&bitmap.mode) {
                         require_approximate(
@@ -859,30 +874,13 @@ fn blit(
     budget.work((area.width() * area.height()) as u64)?;
     for y in area.top..area.bottom {
         for x in area.left..area.right {
-            if bitmap
-                .mask
-                .as_ref()
-                .is_some_and(|mask| !mask.contains(x, y))
-            {
-                continue;
+            if let Some(color) = bitmap.sample(x, y) {
+                if bitmap.raw_copy {
+                    canvas.store(x, y, color, state);
+                } else {
+                    canvas.apply(x, y, color, bitmap.mode, state);
+                }
             }
-            let sx = bitmap.source.left
-                + (((x - dest.left) as i64 * bitmap.source.width() as i64) / dest.width() as i64)
-                    as i32;
-            let sy = bitmap.source.top
-                + (((y - dest.top) as i64 * bitmap.source.height() as i64) / dest.height() as i64)
-                    as i32;
-            let index = (sy - bitmap.bounds.top) as usize * bitmap.bounds.width()
-                + (sx - bitmap.bounds.left) as usize;
-            let color = match &bitmap.pixels {
-                Pixels::Mono(pixels) => [if pixels[index] == 0 { 255 } else { 0 }; 3],
-                Pixels::Rgb(pixels) => [
-                    pixels[index * 3],
-                    pixels[index * 3 + 1],
-                    pixels[index * 3 + 2],
-                ],
-            };
-            canvas.apply(x, y, color, bitmap.mode, state);
         }
     }
     Ok(())

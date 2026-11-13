@@ -80,34 +80,22 @@ fn unsupported(message: &str) -> Error {
     Error::new(ErrorCode::Unsupported, message)
 }
 
-fn signature(data: &[u8], start: usize) -> bool {
+pub(crate) fn signature(data: &[u8], start: usize) -> bool {
     data.get(start + 10..start + 12) == Some(&[0x11, 1])
         || data.get(start + 10..start + 14) == Some(&[0, 0x11, 2, 0xff])
 }
 
-/// Parse raw PICT resources or data-fork files with a 512-byte file header.
-/// Resource-fork maps, MacBinary, AppleDouble and QuickTime containers are not accepted.
+/// Parse an unambiguously selected picture. Use `parse_selected` for multi-picture containers.
 pub fn parse(data: &[u8], container: Container, limits: &Limits) -> Result<Picture> {
-    limits.validate()?;
-    if data.len() > limits.max_input_bytes {
-        return Err(Error::new(
-            ErrorCode::ResourceLimit,
-            "input byte limit exceeded",
-        ));
-    }
-    let (start, container) = match container {
-        Container::Raw => (0, Container::Raw),
-        Container::File => (512, Container::File),
-        Container::Auto => match (signature(data, 0), signature(data, 512)) {
-            (true, false) => (0, Container::Raw),
-            (false, true) => (512, Container::File),
-            (true, true) => return Err(malformed("ambiguous container; specify raw or file")),
-            _ => return Err(malformed("no PICT v1/v2 signature at offset 0 or 512")),
-        },
-    };
-    let bytes = data
-        .get(start..)
-        .ok_or_else(|| malformed("missing 512-byte file header"))?;
+    crate::parse_selected(data, container, crate::PictureSelector::Unique, limits)
+}
+
+pub(crate) fn parse_payload(
+    bytes: &[u8],
+    start: usize,
+    container: Container,
+    limits: &Limits,
+) -> Result<Picture> {
     let mut r = Reader::new(bytes, start);
     let declared_size = r.u16()? as usize;
     let frame = r.rect()?;
@@ -121,7 +109,7 @@ pub fn parse(data: &[u8], container: Container, limits: &Limits) -> Result<Pictu
         _ => return Err(malformed("invalid PICT version signature").at(start + 10)),
     };
     let mut budget = Budget::new(limits);
-    budget.work(data.len() as u64)?;
+    budget.work(bytes.len() as u64)?;
     let mut diagnostics = Vec::new();
     let mut resolution = None;
     let mut header = Vec::new();
@@ -213,6 +201,7 @@ pub fn parse(data: &[u8], container: Container, limits: &Limits) -> Result<Pictu
         );
     }
     Ok(Picture {
+        resource_id: None,
         frame,
         version,
         container,
@@ -444,7 +433,8 @@ fn command(
                 data: r.blob(size, budget)?,
             }
         }
-        0x8200 | 0x8201 => {
+        0x8200 => quicktime(r, budget)?,
+        0x8201 => {
             let size = r.u32()? as usize;
             Command::Unsupported {
                 feature: "quicktime_image",
@@ -635,7 +625,153 @@ fn bitmap(r: &mut Reader<'_>, op: u16, version: u8, budget: &mut Budget<'_>) -> 
         mode,
         mask,
         pixels,
+        source_mask: None,
+        raw_copy: false,
     })
+}
+
+fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
+    let size = r.u32()? as usize;
+    let base = r.offset();
+    let data = r.take(size)?;
+    let mut q = Reader::new(data, base);
+    if q.u16()? != 0 {
+        budget.allocate(data.len())?;
+        return Ok(Command::Unsupported {
+            feature: "quicktime_opcode_version",
+            data: data.to_vec(),
+        });
+    }
+    let mut matrix = [0i32; 9];
+    for v in &mut matrix {
+        *v = q.u32()? as i32;
+    }
+    if matrix[1] != 0
+        || matrix[2] != 0
+        || matrix[3] != 0
+        || matrix[5] != 0
+        || matrix[8] != 0x40000000
+        || matrix[0] <= 0
+        || matrix[4] <= 0
+    {
+        return Err(unsupported(
+            "QuickTime requires positive axis-aligned scale/translation; rotation, reflection and perspective are not implemented",
+        ));
+    }
+    let matte_size = q.u32()? as usize;
+    let matte = q.rect()?;
+    if matte_size != 0 || matte.width() != 0 || matte.height() != 0 {
+        return Err(unsupported("QuickTime mattes are not implemented"));
+    }
+    let mode = q.u16()?;
+    if mode != 0 {
+        return Err(unsupported(
+            "QuickTime still images currently require srcCopy mode",
+        ));
+    }
+    let source = q.rect()?;
+    q.u32()?; // accuracy is a decompressor preference, not a spatial transform
+    let mask_size = q.u32()? as usize;
+    let source_mask = if mask_size == 0 {
+        None
+    } else {
+        if mask_size > 65525 {
+            return Err(unsupported(
+                "QuickTime source mask exceeds supported region size",
+            ));
+        }
+        let mask = q.take(mask_size)?;
+        budget.allocate(mask_size + 10)?;
+        let mut packed = ((mask_size + 10) as u16).to_be_bytes().to_vec();
+        for v in [source.top, source.left, source.bottom, source.right] {
+            packed.extend_from_slice(&(v as i16).to_be_bytes());
+        }
+        packed.extend_from_slice(mask);
+        Some(region(
+            &mut Reader::new(&packed, base + q.pos - mask_size - 10),
+            budget,
+        )?)
+    };
+    let at = q.pos;
+    let description_size = q.u32()? as usize;
+    if description_size < 86 {
+        return Err(malformed("QuickTime image description too short"));
+    }
+    q.take(description_size - 4)?;
+    if description_size != 86 {
+        return Err(unsupported(
+            "QuickTime image-description extensions are not implemented",
+        ));
+    }
+    let mut d = Reader::new(&data[at..at + 86], base + at);
+    d.u32()?;
+    let codec = d.take(4)?;
+    d.take(8)?;
+    if d.u16()? != 0 || d.u16()? != 0 {
+        return Err(unsupported(
+            "QuickTime image-description version not implemented",
+        ));
+    }
+    d.take(12)?;
+    let width = d.u16()? as usize;
+    let height = d.u16()? as usize;
+    if width == 0 || height == 0 {
+        return Err(malformed("empty QuickTime image"));
+    }
+    budget.limits.pixels(width, height)?;
+    d.take(8)?;
+    let compressed_size = d.u32()? as usize;
+    if d.u16()? != 1 {
+        return Err(unsupported("QuickTime still image must have one frame"));
+    }
+    d.take(32)?;
+    let depth = d.u16()?;
+    if !matches!(depth, 8 | 24 | 32 | 40) || d.u16()? != 0xffff {
+        return Err(unsupported(
+            "QuickTime image depth or external color table not implemented",
+        ));
+    }
+    if compressed_size != data.len() - q.pos {
+        return Err(malformed("QuickTime compressed image length mismatch"));
+    }
+    let bounds = Rect {
+        top: 0,
+        left: 0,
+        bottom: height as i32,
+        right: width as i32,
+    };
+    if source.width() == 0 || source.height() == 0 || source.intersect(bounds) != source {
+        return Err(malformed(
+            "QuickTime source rectangle outside decoded image",
+        ));
+    }
+    let coordinate = |value: i32, scale: i32, translation: i32| -> Result<i32> {
+        let fixed = value as i64 * scale as i64 + translation as i64;
+        if fixed.rem_euclid(65536) != 0 {
+            return Err(unsupported(
+                "QuickTime transformed source edges must be integral pixels",
+            ));
+        }
+        i32::try_from(fixed / 65536)
+            .map_err(|_| malformed("QuickTime transform coordinate overflow"))
+    };
+    let destination = Rect {
+        left: coordinate(source.left, matrix[0], matrix[6])?,
+        right: coordinate(source.right, matrix[0], matrix[6])?,
+        top: coordinate(source.top, matrix[4], matrix[7])?,
+        bottom: coordinate(source.bottom, matrix[4], matrix[7])?,
+    };
+    let rgb = crate::codec::decode(codec, q.take(compressed_size)?, width, height, budget)?;
+    Ok(Command::Bitmap(Bitmap {
+        bounds,
+        source,
+        destination,
+        mode,
+        mask: None,
+        pixels: Pixels::Rgb(rgb),
+        source_mask,
+        raw_copy: true,
+    }))
 }
 
 struct MapLayout {

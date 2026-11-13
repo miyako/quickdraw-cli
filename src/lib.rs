@@ -2,6 +2,8 @@
 //!
 //! This is a documented subset, not a pixel-identical classic QuickDraw emulator.
 //! Parsing is independent of rendering; unsupported drawing is never silently lost.
+mod codec;
+mod container;
 mod font;
 mod model;
 mod output;
@@ -9,6 +11,9 @@ mod parser;
 mod raster;
 mod vector;
 
+pub use container::{
+    ContainerInventory, PictureEntry, PictureSelector, list_pictures, parse_selected,
+};
 pub use font::{BitmapFont, FontBook};
 pub use model::{
     Container, Diagnostic, Error, ErrorCode, Fidelity, Inspection, Limits, Picture, Rect, Result,

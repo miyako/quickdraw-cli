@@ -1,5 +1,7 @@
 """Independently parse our generated documents, not a classic QuickDraw oracle."""
 import json
+import io
+from contextlib import closing
 import os
 from pathlib import Path
 import struct
@@ -10,6 +12,8 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from pypdf import PdfReader
+import pypdfium2 as pdfium
+from PIL import Image
 
 BINARY = Path(os.environ.get("QUICKDRAW_BINARY", f"target/debug/quickdraw{'.exe' if sys.platform == 'win32' else ''}")).resolve()
 
@@ -18,8 +22,8 @@ def words(*values):
     return struct.pack(">" + "h" * len(values), *values)
 
 
-def picture(operations):
-    data = bytearray(words(0, 0, 0, 10, 20) + b"\x00\x11\x02\xff\x0c\x00")
+def picture(operations, frame=(0, 0, 10, 20)):
+    data = bytearray(words(0, *frame) + b"\x00\x11\x02\xff\x0c\x00")
     data.extend(b"\xff\xff\xff\xff" + bytes(20))
     for op, payload in operations:
         if len(data) % 2:
@@ -37,13 +41,28 @@ class Documents(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
-    def convert(self, extension, policy="preserve", operations=None, extra=()):
+    def convert(self, extension, policy="preserve", operations=None, extra=(), frame=(0,0,10,20)):
         source, target = self.root / "input.pict", self.root / f"output.{extension}"
-        source.write_bytes(picture(operations or [(0x31, words(0, 0, 10, 20))]))
+        source.write_bytes(picture(operations or [(0x31, words(0, 0, 10, 20))], frame))
         result = subprocess.run([str(BINARY), "convert", "--input", str(source), "--output", str(target),
                                  "--vector-policy", policy, "--overwrite", "--dpi", "144", *extra],
                                 capture_output=True, check=False)
         return result, target
+
+    def compare_pdf_with_raster(self, operations, frame=(0,0,10,20)):
+        result, target = self.convert("pdf", operations=operations, frame=frame)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = self.root / "expected.png"
+        result = subprocess.run([str(BINARY),"convert","--input",str(self.root/"input.pict"),
+                                 "--output",str(expected),"--overwrite"],capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        with closing(pdfium.PdfDocument(str(target))) as document, \
+             closing(document[0]) as page, \
+             closing(page.render(scale=2, no_smoothimage=True, no_smoothpath=True)) as bitmap:
+            actual = bitmap.to_pil().convert("RGB")
+            with Image.open(expected) as image:
+                self.assertEqual(actual.size,image.size)
+                self.assertEqual(actual.tobytes(),image.convert("RGB").tobytes())
 
     def test_pdf_xref_page_content_and_physical_transform(self):
         result, target = self.convert("pdf")
@@ -104,6 +123,47 @@ class Documents(unittest.TestCase):
         self.assertIn(b"f",[op for _,op in operations])
         self.assertNotIn(b"f*",[op for _,op in operations])
         self.assertNotIn(b"Do",[op for _,op in operations])
+
+    def test_masked_scaled_bitmap_placement_matches_raster_in_pdfium(self):
+        header = words(2,5,7,7,9, 5,7,7,9, 2,3,8,11, 0)
+        mask = words(10,3,5,7,10)
+        ops = [(0x31,words(0,0,10,20)),(0x1a,words(-1,0,0)),(0x1b,words(0,0,-1)),
+               (0x0c,words(1,1)),(1,words(10,1,0,9,18)),
+               (0x91,header+mask+bytes([0x80,0,0x40,0]))]
+        self.compare_pdf_with_raster(ops)
+        result, target = self.convert("svg",operations=ops)
+        self.assertEqual(result.returncode,0,result.stderr)
+        tree = ET.parse(target)
+        images = tree.findall(".//{http://www.w3.org/2000/svg}image")
+        self.assertEqual(len(images),1)
+        self.assertTrue(images[0].get("{http://www.w3.org/1999/xlink}href").startswith("data:image/png;base64,"))
+
+    def test_tiled_copy_inversion_and_transparency_keep_pattern_phase(self):
+        for mode in (8,12,44):
+            for frame in ((0,0,10,20),(-2,-3,8,17)):
+                ops = [(0x1a,words(0,0,-1)),(0x31,words(*frame)),
+                       (0x1a,words(0,-1,0)),(9,bytes([128,64,32,16,8,4,2,1])),
+                       (8,words(mode)),(0x0c,words(3,1)),(0x31,words(1,3,9,19))]
+                self.compare_pdf_with_raster(ops,frame)
+
+    def test_quicktime_png_source_mask_and_transform_preserve_backdrop(self):
+        image = Image.new("RGB",(2,2))
+        image.putdata([(255,0,0),(0,255,0),(0,0,255),(255,255,0)])
+        buffer = io.BytesIO()
+        image.save(buffer,format="PNG")
+        encoded = buffer.getvalue()
+        mask = words(0,0,1,32767, 2,0,1,32767, 32767)
+        payload = words(0)+struct.pack(">9i",131072,0,0,0,131072,0,196608,131072,1<<30)
+        payload += bytes(14)+words(0,0,2,2)+bytes(4)+struct.pack(">I",len(mask))+mask
+        desc = bytearray(86)
+        struct.pack_into(">I4s",desc,0,86,b"png ")
+        struct.pack_into(">HH",desc,32,2,2)
+        struct.pack_into(">IH",desc,44,len(encoded),1)
+        struct.pack_into(">Hh",desc,82,24,-1)
+        payload += desc+encoded
+        ops = [(0x31,words(0,0,10,20)),(0x0c,words(1,1)),
+               (0x8200,struct.pack(">I",len(payload))+payload)]
+        self.compare_pdf_with_raster(ops)
 
 
 if __name__ == "__main__":

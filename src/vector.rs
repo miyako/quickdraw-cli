@@ -1,6 +1,7 @@
 use crate::model::*;
-use crate::raster::{State, layout_text, line_points, output_size};
+use crate::raster::{State, copy_color, layout_text, line_points, output_size};
 use crate::{RenderOptions, output};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use std::fmt::Write;
 
 #[derive(Clone, Copy, Debug)]
@@ -236,14 +237,28 @@ fn unsupported(message: &str) -> Error {
         format!("{message}; use explicit whole-picture --vector-policy raster if acceptable"),
     )
 }
-fn color(state: &State<'_>, verb: Verb) -> Result<[u8; 3]> {
+fn color(state: &State<'_>, verb: Verb) -> Result<Option<[u8; 3]>> {
     let (pattern, mode) = state.drawing(verb);
     match pattern {
-        Pattern::Solid(rgb) => Ok(*rgb),
-        Pattern::Bits(bits) if mode == 8 && bits.iter().all(|&b| b == 255) => Ok(state.foreground),
-        Pattern::Bits(bits) if mode == 8 && bits.iter().all(|&b| b == 0) => Ok(state.background),
+        Pattern::Solid(rgb) => Ok(Some(*rgb)),
+        Pattern::Bits(bits)
+            if matches!(mode, 8 | 12)
+                && (bits.iter().all(|&b| b == 255) || bits.iter().all(|&b| b == 0)) =>
+        {
+            let source = pattern.sample(0, 0);
+            Ok(Some(copy_color(
+                if mode == 12 {
+                    source.map(|v| !v)
+                } else {
+                    source
+                },
+                state,
+            )))
+        }
+        Pattern::Color { .. } => Ok(None),
+        Pattern::Bits(_) if matches!(mode, 8 | 12 | 44) => Ok(None),
         _ => Err(unsupported(
-            "vector paths require uniform copy patterns; destination-dependent modes and tiled patterns are not representable by this backend",
+            "vector paths require copy patterns; destination-dependent modes need the complete raster destination",
         )),
     }
 }
@@ -267,6 +282,7 @@ pub fn export_vector(
     let pdf = matches!(format, VectorFormat::Pdf);
     let mut budget = Budget::new(&options.limits);
     let mut content = String::new();
+    let mut resources = Resources::default();
     let mut state = State {
         highlight_color: options.highlight,
         ..Default::default()
@@ -323,8 +339,10 @@ pub fn export_vector(
             }
             let mut path = Path::default();
             let rgb;
+            let mut pattern_verb = Verb::Frame;
             match &op.command {
                 Command::Draw(verb, shape) => {
+                    pattern_verb = *verb;
                     path.1 = true;
                     rgb = color(&state, *verb)?;
                     if matches!((verb, shape), (Verb::Frame, Shape::Arc { .. })) {
@@ -436,7 +454,7 @@ pub fn export_vector(
                 }
                 Command::Text { .. } => {
                     let glyphs = layout_text(&mut state, &op.command, options, &mut budget)?;
-                    rgb = match state.text.mode {
+                    rgb = Some(match state.text.mode {
                         1 if state.foreground == [0; 3] => [0; 3],
                         3 if state.background == [255; 3] => [255; 3],
                         _ => {
@@ -444,7 +462,7 @@ pub fn export_vector(
                                 "colored NFNT Boolean text requires destination pixels",
                             ));
                         }
-                    };
+                    });
                     for placed in glyphs {
                         if placed.glyph.width == 0 {
                             continue;
@@ -474,10 +492,37 @@ pub fn export_vector(
                     }
                     diagnostics.push(Diagnostic::new("explicit_bitmap_font", format!("NFNT id={}, size={}, face={}; glyph pixel runs, no replacement or outline substitution", state.text.id, state.text.size, state.text.face), Some(op.offset)));
                 }
-                Command::Bitmap(_) => {
-                    return Err(unsupported(
-                        "bitmap instructions in preserved vector output are not yet implemented",
-                    ));
+                Command::Bitmap(bitmap) => {
+                    if !matches!(bitmap.mode, 0 | 4 | 36) {
+                        return Err(unsupported(
+                            "preserved bitmap placement requires srcCopy, notSrcCopy or transparent",
+                        ));
+                    }
+                    if bitmap.mode == 4 && matches!(bitmap.pixels, Pixels::Rgb(_)) {
+                        if options.fidelity == Fidelity::Strict {
+                            return Err(unsupported(
+                                "color bitmap notSrcCopy requires --fidelity approximate",
+                            ));
+                        }
+                        diagnostics.push(Diagnostic::new(
+                            "approximation",
+                            "Color bitmap inversion uses the portable RGB profile.",
+                            Some(op.offset),
+                        ));
+                    }
+                    emit_bitmap(
+                        &mut content,
+                        &mut resources,
+                        bitmap,
+                        &state,
+                        picture.frame,
+                        index + 1,
+                        pdf,
+                        &mut budget,
+                    )?;
+                    diagnostics.push(Diagnostic::new("embedded_bitmap","Copy-only bitmap placed with nearest-neighbor sampling and explicit masks; other geometry stays vector.",Some(op.offset)));
+                    state.highlight = false;
+                    return Ok(());
                 }
                 Command::Unsupported { feature, .. } => return Err(unsupported(feature)),
                 Command::Comment { .. } => {
@@ -510,16 +555,33 @@ pub fn export_vector(
             let viewport = picture.frame.translated(state.origin)?;
             // Negative translation is represented in i64 to cover i32::MIN coordinates.
             let delta = (-(viewport.left as i64), -(viewport.top as i64));
-            emit(
-                &mut content,
-                &path,
-                state.clip.map(|_| &clip),
-                rgb,
-                delta,
-                index + 1,
-                pdf,
-                &mut budget,
-            )?;
+            if let Some(rgb) = rgb {
+                emit(
+                    &mut content,
+                    &path,
+                    state.clip.map(|_| &clip),
+                    rgb,
+                    delta,
+                    index + 1,
+                    pdf,
+                    &mut budget,
+                )?;
+            } else {
+                emit_pattern(
+                    &mut content,
+                    &mut resources,
+                    &path,
+                    state.clip.map(|_| &clip),
+                    state.drawing(pattern_verb).0,
+                    state.drawing(pattern_verb).1,
+                    &state,
+                    (w / fw as f64, h / fh as f64, h),
+                    picture.frame,
+                    index + 1,
+                    pdf,
+                    &mut budget,
+                )?;
+            }
             state.highlight = false;
             Ok(())
         })();
@@ -531,7 +593,8 @@ pub fn export_vector(
         content.push_str("</svg>\n");
     }
     let bytes = if pdf {
-        output::pdf_document(w, h, content.into_bytes(), None)?
+        let dictionary = resources.dictionary();
+        output::pdf_objects(w, h, content.into_bytes(), &dictionary, resources.objects)?
     } else {
         content.into_bytes()
     };
@@ -593,6 +656,282 @@ fn emit(
         write!(
             out,
             "<path fill=\"#{r:02x}{g:02x}{b:02x}\" fill-rule=\"{}\" d=\"{}\"/>",
+            if path.1 { "evenodd" } else { "nonzero" },
+            path.text(false)
+        )
+        .unwrap();
+        if clip.is_some() {
+            out.push_str("</g>");
+        }
+        out.push_str("</g>");
+    }
+    Ok(())
+}
+
+struct PixelsImage {
+    width: usize,
+    height: usize,
+    rgb: Vec<u8>,
+    alpha: Option<Vec<u8>>,
+}
+#[derive(Default)]
+struct Resources {
+    objects: Vec<Vec<u8>>,
+    images: Vec<usize>,
+    patterns: Vec<usize>,
+}
+impl Resources {
+    fn object(&mut self, data: Vec<u8>) -> usize {
+        let id = self.objects.len() + 5;
+        self.objects.push(data);
+        id
+    }
+    fn image(&mut self, image: &PixelsImage, budget: &mut Budget<'_>) -> Result<usize> {
+        let mask = if let Some(alpha) = &image.alpha {
+            budget.allocate(alpha.len() + 256)?;
+            Some(self.object(output::pdf_stream(&format!("/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Interpolate false",image.width,image.height),alpha)))
+        } else {
+            None
+        };
+        budget.allocate(image.rgb.len() + 512)?;
+        let mask = mask.map_or(String::new(), |id| format!("/SMask {id} 0 R"));
+        let id=self.object(output::pdf_stream(&format!("/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Interpolate false {mask}",image.width,image.height),&image.rgb));
+        self.images.push(id);
+        Ok(id)
+    }
+    fn dictionary(&self) -> String {
+        let mut s = String::new();
+        if !self.images.is_empty() {
+            s.push_str("/XObject << ");
+            for id in &self.images {
+                write!(s, "/Im{id} {id} 0 R ").unwrap();
+            }
+            s.push_str(">> ");
+        }
+        if !self.patterns.is_empty() {
+            s.push_str("/Pattern << ");
+            for id in &self.patterns {
+                write!(s, "/P{id} {id} 0 R ").unwrap();
+            }
+            s.push_str(">> ");
+        }
+        s
+    }
+}
+fn image_uri(image: &PixelsImage, budget: &mut Budget<'_>) -> Result<String> {
+    budget.allocate(
+        image
+            .width
+            .checked_mul(image.height)
+            .and_then(|n| n.checked_mul(20))
+            .and_then(|n| n.checked_add(8192))
+            .ok_or_else(|| Error::new(ErrorCode::ResourceLimit, "embedded PNG size overflow"))?,
+    )?;
+    let rgba = image.alpha.as_ref().map(|alpha| {
+        let mut rgba = Vec::with_capacity(alpha.len() * 4);
+        for (pixel, &a) in image.rgb.chunks_exact(3).zip(alpha) {
+            rgba.extend_from_slice(pixel);
+            rgba.push(a);
+        }
+        rgba
+    });
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, image.width as u32, image.height as u32);
+        encoder.set_color(if rgba.is_some() {
+            png::ColorType::Rgba
+        } else {
+            png::ColorType::Rgb
+        });
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| Error::new(ErrorCode::Encoding, e.to_string()))?;
+        writer
+            .write_image_data(rgba.as_deref().unwrap_or(&image.rgb))
+            .map_err(|e| Error::new(ErrorCode::Encoding, e.to_string()))?;
+        writer
+            .finish()
+            .map_err(|e| Error::new(ErrorCode::Encoding, e.to_string()))?;
+    }
+    Ok(format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
+}
+#[allow(clippy::too_many_arguments)]
+fn emit_bitmap(
+    out: &mut String,
+    resources: &mut Resources,
+    bitmap: &Bitmap,
+    state: &State<'_>,
+    frame: Rect,
+    id: usize,
+    pdf: bool,
+    budget: &mut Budget<'_>,
+) -> Result<()> {
+    let viewport = frame.translated(state.origin)?;
+    let mut area = bitmap.destination.intersect(viewport);
+    if let Some(clip) = state.clip {
+        area = area.intersect(clip.bounds);
+    }
+    if area.width() == 0 || area.height() == 0 {
+        return Ok(());
+    }
+    let count = budget.limits.pixels(area.width(), area.height())?;
+    budget.allocate(count * 4)?;
+    budget.work(count as u64)?;
+    let mut image = PixelsImage {
+        width: area.width(),
+        height: area.height(),
+        rgb: vec![0; count * 3],
+        alpha: None,
+    };
+    let mut alpha = vec![0; count];
+    for y in area.top..area.bottom {
+        for x in area.left..area.right {
+            if state.clip.is_some_and(|c| !c.contains(x, y)) {
+                continue;
+            }
+            if let Some(source) = bitmap.sample(x, y) {
+                let i = (y - area.top) as usize * area.width() + (x - area.left) as usize;
+                if bitmap.mode == 36 && source == state.background {
+                    continue;
+                }
+                let rgb = if bitmap.raw_copy || bitmap.mode == 36 {
+                    source
+                } else {
+                    copy_color(
+                        if bitmap.mode == 4 {
+                            source.map(|v| !v)
+                        } else {
+                            source
+                        },
+                        state,
+                    )
+                };
+                image.rgb[i * 3..i * 3 + 3].copy_from_slice(&rgb);
+                alpha[i] = 255;
+            }
+        }
+    }
+    if alpha.iter().all(|&a| a == 0) {
+        return Ok(());
+    }
+    if alpha.iter().any(|&a| a != 255) {
+        image.alpha = Some(alpha);
+    }
+    let x = area.left as i64 - viewport.left as i64;
+    let y = area.top as i64 - viewport.top as i64;
+    budget.allocate(1024)?;
+    if pdf {
+        let object = resources.image(&image, budget)?;
+        writeln!(
+            out,
+            "q\n{} 0 0 -{} {x} {} cm\n/Im{object} Do\nQ",
+            image.width,
+            image.height,
+            y + image.height as i64
+        )
+        .unwrap();
+    } else {
+        let uri = image_uri(&image, budget)?;
+        write!(out,"<image xmlns:xlink=\"http://www.w3.org/1999/xlink\" id=\"image{id}\" x=\"{x}\" y=\"{y}\" width=\"{}\" height=\"{}\" image-rendering=\"pixelated\" xlink:href=\"{uri}\"/>",image.width,image.height).unwrap();
+    }
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+fn emit_pattern(
+    out: &mut String,
+    resources: &mut Resources,
+    path: &Path,
+    clip: Option<&Path>,
+    pattern: &Pattern,
+    mode: u16,
+    state: &State<'_>,
+    scale: (f64, f64, f64),
+    frame: Rect,
+    id: usize,
+    pdf: bool,
+    budget: &mut Budget<'_>,
+) -> Result<()> {
+    let (width, height) = match pattern {
+        Pattern::Color { bounds, .. } => (bounds.width(), bounds.height()),
+        Pattern::Bits(_) => (8, 8),
+        Pattern::Solid(_) => unreachable!("uniform color"),
+    };
+    let n = budget.limits.pixels(width, height)?;
+    budget.allocate(n * 4)?;
+    budget.work(n as u64)?;
+    let mut image = PixelsImage {
+        width,
+        height,
+        rgb: Vec::with_capacity(n * 3),
+        alpha: None,
+    };
+    let mut alpha = Vec::with_capacity(n);
+    for y in 0..height {
+        for x in 0..width {
+            let color = pattern.sample(x as i32, y as i32);
+            let bit_pattern = matches!(pattern, Pattern::Bits(_));
+            alpha.push(if bit_pattern && mode == 44 && color == state.background {
+                0
+            } else {
+                255
+            });
+            image.rgb.extend_from_slice(&if bit_pattern && mode != 44 {
+                copy_color(if mode == 12 { color.map(|v| !v) } else { color }, state)
+            } else {
+                color
+            });
+        }
+    }
+    if alpha.contains(&0) {
+        image.alpha = Some(alpha);
+    }
+    let viewport = frame.translated(state.origin)?;
+    let (x, y) = (-(viewport.left as i64), -(viewport.top as i64));
+    let segments = path.0.len() + clip.map_or(0, |c| c.0.len());
+    budget.allocate(
+        segments
+            .checked_mul(256)
+            .and_then(|n| n.checked_add(2048))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::ResourceLimit,
+                    "pattern serialization size overflow",
+                )
+            })?,
+    )?;
+    if pdf {
+        let image_id = resources.image(&image, budget)?;
+        let (sx, sy, h) = scale;
+        let matrix = format!(
+            "{sx:.16} 0 0 {:.16} {:.16} {:.16}",
+            -sy,
+            -sx * frame.left as f64,
+            h + sy * frame.top as f64
+        );
+        let data = format!("q\n{width} 0 0 -{height} 0 {height} cm\n/Im{image_id} Do\nQ\n");
+        let object=resources.object(output::pdf_stream(&format!("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 {width} {height}] /XStep {width} /YStep {height} /Matrix [{matrix}] /Resources << /XObject << /Im{image_id} {image_id} 0 R >> >>"),data.as_bytes()));
+        resources.patterns.push(object);
+        writeln!(out, "q\n1 0 0 1 {x} {y} cm").unwrap();
+        if let Some(clip) = clip {
+            writeln!(out, "{}W* n", clip.text(true)).unwrap();
+        }
+        writeln!(
+            out,
+            "/Pattern cs /P{object} scn\n{}{}\nQ",
+            path.text(true),
+            if path.1 { "f*" } else { "f" }
+        )
+        .unwrap();
+    } else {
+        let uri = image_uri(&image, budget)?;
+        write!(out,"<g transform=\"translate({x} {y})\"><defs><pattern id=\"p{id}\" patternUnits=\"userSpaceOnUse\" width=\"{width}\" height=\"{height}\" patternTransform=\"translate({} {})\"><image xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{width}\" height=\"{height}\" image-rendering=\"pixelated\" xlink:href=\"{uri}\"/></pattern></defs>",state.origin.x,state.origin.y).unwrap();
+        if let Some(clip) = clip {
+            write!(out,"<defs><clipPath id=\"c{id}\" clipPathUnits=\"userSpaceOnUse\"><path clip-rule=\"evenodd\" d=\"{}\"/></clipPath></defs><g clip-path=\"url(#c{id})\">",clip.text(false)).unwrap();
+        }
+        write!(
+            out,
+            "<path fill=\"url(#p{id})\" fill-rule=\"{}\" d=\"{}\"/>",
             if path.1 { "evenodd" } else { "nonzero" },
             path.text(false)
         )

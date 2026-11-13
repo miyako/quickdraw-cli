@@ -105,6 +105,10 @@ must provide appropriately licensed extracted NFNT resources and preserve them
 alongside the PICT. Probe capabilities rather than assuming every font, codec or
 vector operation is supported. Use `source_revision` and archive integrity, not
 the development version string alone, to identify an exact milestone build.
+Container ingestion adds `list-pictures`, `--resource-id` and `--data-fork`
+without changing the envelope. The JPEG decoder is linked into the CLI; the
+JPEG encoder, Pillow, pypdf and PDFium are test-only, not external runtime
+requirements or files installed beside the binary.
 
 Archives use sorted members, a fixed 1980 timestamp, explicit Unix permissions,
 canonical JSON and stored (uncompressed) members. Identical binary, source/docs,

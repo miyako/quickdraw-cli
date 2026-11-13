@@ -9,8 +9,10 @@ font search, or network services are used during conversion.
 **Not a fully capable QuickDraw emulator or a general archival migration tool.**
 Origin changes, rounded rectangles, arcs, pixel patterns, arithmetic/highlight
 modes and native-size one-bit NFNT text are implemented with explicit limitations.
-QuickTime images, outline/scaled/multibyte text, several modes and mixed vector
-operations remain unsupported. Unsupported drawing fails instead of disappearing.
+Resource forks, MacBinary and AppleDouble support explicit picture selection.
+Embedded JPEG/PNG still images support bounded decoding and restricted transforms.
+Other QuickTime codecs/transforms, outline/scaled/multibyte text and several
+vector modes remain unsupported. Unsupported drawing fails instead of disappearing.
 Classic-Mac pixel fidelity has not been established.
 The separate `miyako/quickdraw` 4D component is not implemented here.
 
@@ -19,6 +21,8 @@ cargo build --locked --release
 target/release/quickdraw --version
 target/release/quickdraw capabilities
 target/release/quickdraw inspect --input drawing.pict
+target/release/quickdraw list-pictures --input archive.bin
+target/release/quickdraw convert --input archive.bin --resource-id 128 --output selected.png
 target/release/quickdraw convert --input drawing.pict --output drawing.png
 target/release/quickdraw convert --input drawing.pict --output drawing.svg \
   --fidelity approximate --vector-policy raster
@@ -89,8 +93,9 @@ Remove the local test environment when finished; it is not part of an asset.
 Tests construct original synthetic PICT data, verify specific pixels and failure
 paths, and exercise the CLI as a subprocess. Their expected output is not an
 independent classic-Mac oracle. The document tests independently parse PDF with
-pypdf and SVG with Python's XML parser; this checks document structure and
-selected content, not historical rendering fidelity.
+pypdf and SVG with Python's XML parser. PDFium also independently renders selected
+bitmap/pattern output for comparison with the raster backend. These checks do
+not establish historical QuickDraw fidelity.
 Native macOS ARM64, macOS x86_64 and Windows x86_64
 CI jobs run tests before producing unsigned archives. CI artifacts are not
 published releases.

@@ -47,7 +47,7 @@ fn curves_emit_beziers_and_negative_arc_sweep_keeps_direction() {
 }
 #[test]
 fn destination_modes_patterns_and_missing_fonts_never_disappear_in_vectors() {
-    for (opcode, data) in [(8, word(10)), (9, vec![0xaa; 8])] {
+    for (opcode, data) in [(8, word(10)), (8, word(9))] {
         let mut p = Pict::new(2, 2, 2);
         p.op(opcode, &data).op(0x31, &rect(0, 0, 2, 2));
         let pic = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
@@ -119,10 +119,77 @@ fn output_is_deterministic_with_explicit_physical_size_and_pdf_bounds() {
             ErrorCode::InvalidArguments
         );
     }
+
     assert_eq!(
         export_vector(&pic, &options, 0.001, VectorFormat::Pdf)
             .unwrap_err()
             .code,
         ErrorCode::InvalidArguments
+    );
+}
+
+#[test]
+fn indexed_color_tiles_are_preserved_without_pen_mode_or_foreground_tint() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut tile = word(1);
+    tile.extend([0; 8]);
+    tile.extend(pixmap_header(2, [0, 0, 2, 2], 1, 0, false, 1));
+    tile.extend([0; 6]);
+    tile.extend(word(1));
+    tile.extend(words(&[0, -1, 0, 0, 1, 0, -1, 0]));
+    tile.extend([0x40, 0, 0x80, 0]);
+    let mut p = Pict::new(2, 8, 4);
+    p.op(0x1a, &words(&[0, 0, -1]))
+        .op(8, &word(10))
+        .op(0x13, &tile);
+    p.op(0x0c, &words(&[3, 1])).op(0x31, &rect(1, 3, 5, 11));
+    let s = svg(p, &RenderOptions::default());
+    assert!(s.contains("patternTransform=\"translate(3 1)\""));
+    let encoded = s
+        .split("data:image/png;base64,")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let png = STANDARD.decode(encoded).unwrap();
+    let mut reader = png::Decoder::new(png.as_slice()).read_info().unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    reader.next_frame(&mut pixels).unwrap();
+    assert_eq!(pixels, [255, 0, 0, 0, 255, 0, 0, 255, 0, 255, 0, 0]);
+}
+
+#[test]
+fn preserved_bitmaps_reject_destination_modes_and_bound_resampled_buffers() {
+    let mut p = Pict::new(2, 100, 100);
+    p.op(
+        0x90,
+        &mono(2, [0, 0, 1, 2], [0, 0, 100, 100], 2, &[0x80, 0]),
+    );
+    let picture = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
+    assert_eq!(
+        export_vector(&picture, &RenderOptions::default(), 72.0, VectorFormat::Svg)
+            .unwrap_err()
+            .code,
+        ErrorCode::Unsupported
+    );
+    let mut p = Pict::new(2, 100, 100);
+    p.op(
+        0x90,
+        &mono(2, [0, 0, 1, 2], [0, 0, 100, 100], 0, &[0x80, 0]),
+    );
+    let picture = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
+    let options = RenderOptions {
+        limits: Limits {
+            max_decoded_bytes: 10000,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert_eq!(
+        export_vector(&picture, &options, 72.0, VectorFormat::Svg)
+            .unwrap_err()
+            .code,
+        ErrorCode::ResourceLimit
     );
 }

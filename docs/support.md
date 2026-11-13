@@ -14,6 +14,7 @@ emits an operation-offset warning for every accepted approximation.
 | v1 byte opcodes; v2 word alignment, original/extended HeaderOp | Supported; nonzero padding rejected; required v2 header |
 | Extended header resolution and source rectangle | Resolution retained; source rectangle must equal picFrame; other mappings fail |
 | Raw PICT and 512-byte-header PICT files | Supported, explicit or unambiguous auto-detection |
+| Resource fork / MacBinary I-II-III / AppleDouble v2 | Bounded extraction, signed resource IDs, inventory and explicit data-fork/resource selection; no filesystem extraction or companion-file lookup |
 | Rectangular and transition-encoded regions (`01`, `80`-`84`) | Clipping, paint, fill, erase, invert; strict rectangular frames; complex frames approximate |
 | Background/pen/fill 8x8 patterns (`02`, `09`, `0A`) | Supported, distinct state |
 | Pen size/mode (`07`, `08`) | Nonnegative rectangular pens; Boolean, arithmetic and highlight modes below |
@@ -41,12 +42,14 @@ emits an operation-offset warning for every accepted approximation.
 | Highlight (`1C`-`1E`, modes 50/52/58/60) | Exchanges background/highlight colors, leaves other destination colors intact; one-shot HiliteMode; explicit HiliteColor or CLI highlight required |
 | Transparent pattern mode 44 | Whole-pixel background keying |
 | Dithering / other extended modes | Unsupported; never silently mapped to copy |
-| QuickTime (`8200`, `8201`) | Length/payload retained; codec rendering fails |
+| QuickTime compressed (`8200`) | JPEG/PNG still decoding; restricted positive scale/translation, integral edges, source crop/mask, clip/origin and direct RGB srcCopy |
+| QuickTime uncompressed (`8201`) / other codecs | Explicitly unsupported; no silent substitute decoder |
 | Unknown opcodes / unknown length layouts | Fail with offset and opcode; no recovery by guessing |
-| Resource forks, MacBinary, AppleDouble | Unsupported containers; extract a single PICT resource first |
+| AppleSingle / packed MacBinary / native resource-fork filesystem access | Unsupported; supply a supported file container |
 | PNG | Opaque RGB output |
 | SVG / PDF | Explicit whole-picture raster or supported genuine-path policy; PDF 1.4 single page |
-| Native vector subset | Uniform copy shapes/regions, axis-aligned lines and NFNT runs; tiled patterns, destination modes, bitmap instructions and diagonal/polygon/arc/complex-region frames require explicit whole-picture raster |
+| Native vector subset | Source-only tiled patterns and embedded bitmap placements, shapes/regions, axis-aligned lines and NFNT runs; destination-dependent modes and diagonal/polygon/arc/complex-region frames require explicit whole-picture raster |
+| Remaining embedded-image gaps | Mattes, nonopaque alpha, noncopy QuickTime modes, rotation/reflection/perspective, fractional edges, extended descriptions, animation, CMYK/16-bit images |
 | Outline/scaled/fractional/multibyte text, optional NFNT tables | Unsupported; no silent substitution |
 | Classic screen emulation | Not implemented |
 
@@ -110,7 +113,8 @@ nothing. Negative-size geometric rectangles have empty coverage.
 
 All fixtures in `tests/common`, `tests/core.rs`, `tests/bitmaps.rs` and
 `tests/cli.rs`, `tests/semantics.rs`, `tests/fonts.rs`, `tests/vectors.rs` and
-`scripts/test_documents.py` are authored synthetically in this repository. No reference
+`tests/containers.rs`, `tests/quicktime.rs` and `scripts/test_documents.py` are
+authored synthetically in this repository. No reference
 repository pictures or expected image files are copied. Tests cover both PICT
 versions, header containers/alignment, lengths and truncation, mutation sweeps,
 limits, PackBits byte/word boundaries, indexed/direct pixels, clipped patterns,
@@ -123,6 +127,17 @@ text-start versus advanced pen coordinates, genuine paths and vector rejection.
 pypdf independently checks generated PDF xrefs, page dimensions, content streams
 and complete-composite image bytes; the XML parser checks SVG structure/clipping.
 These are document interoperability checks, not a classic rendering oracle.
+Container tests construct original maps/headers, exercise every truncation and
+selected offset/overlap/duplicate/CRC failures, and verify signed IDs and absolute
+opcode offsets. Embedded PNG fixtures are authored pixel arrays encoded by the
+existing PNG crate/Pillow; JPEG fixtures are generated from authored RGB/CMYK
+arrays by the independent `jpeg-encoder` test dependency. Actual decoding,
+placement and observable failures are tested; JPEG pixel assertions allow lossy
+rounding. No compressed-image fixture is copied from another repository.
+PDFium independently rasterizes source-only bitmap/pattern PDF output and is
+compared with this project's raster interpreter for selected synthetic cases,
+including masks, negative picture origins and transparent pattern holes.
+This is independent output-backend evidence, not independent QuickDraw fidelity.
 
 The tests' truth tables and selected expected pixels establish the declared
 implementation profile, **not independent rendering fidelity**. The mutation
@@ -144,6 +159,12 @@ jobs is not evidence that Windows tests passed.
 * [Apple, PICT opcode and PixMap packing tables](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-461.html)
 * [Apple, QuickDraw image/pen/shape semantics](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-12.html)
 * [Apple, printer comments](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-465.html)
+* [Apple, resource file format](https://dev.os9.ca/techpubs/mac/MoreToolbox/MoreToolbox-99.html)
+* [MacBinary II specification](https://files.stairways.com/other/macbinaryii-standard-info.txt)
+* [RFC 1740, AppleDouble layout](https://www.rfc-editor.org/rfc/rfc1740.html)
+* QuickDrawViewer `QuickTime.swift` (read-only format comparison): compressed
+  picture fields and source-region transition layout; no implementation copied.
+  Matrix fields follow QuickTime 16.16 affine and 2.30 projective conventions.
 * [Apple, SetOrigin semantics](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-40.html)
 * [Apple, FrameRoundRect](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-103.html)
 * [Apple, FrameArc](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-115.html)
@@ -165,7 +186,7 @@ jobs is not evidence that Windows tests passed.
 This is a usable **subset foundation**, not a fully capable conversion backbone.
 The versioned CLI and assets allow future wrapper integration work, but broad
 wrapper readiness remains limited by outline/scaled/multibyte font handling,
-embedded QuickTime codecs, remaining modes/containers, vector coverage and
+remaining QuickTime codecs/transforms, modes/containers, vector coverage and
 independent corpus/fidelity validation. Explicit bitmap fonts and supported
 vector paths are usable, not a claim of complete font or printer support. A wrapper must not
 hide those failures or discard success warnings. No wrapper component, release
