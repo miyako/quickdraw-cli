@@ -45,7 +45,7 @@ emits an operation-offset warning for every accepted approximation.
 | Highlight (`1C`-`1E`, modes 50/52/58/60) | Exchanges background/highlight colors, leaves other destination colors intact; one-shot HiliteMode; explicit HiliteColor or CLI highlight required |
 | Transparent pattern mode 44 | Whole-pixel background keying |
 | Dithering / other extended modes | Unsupported; never silently mapped to copy |
-| QuickTime compressed (`8200`) | JPEG/PNG, direct and explicitly paletted 1/2/4/8-bit raw/Animation, RGB555 RPZA and explicitly paletted SMC self-contained stills; exact explicit boundaries in CLI contract |
+| QuickTime compressed (`8200`) | JPEG/PNG, single-page TIFF/single-image GIF, direct and explicitly paletted 1/2/4/8-bit raw/Animation, RGB555 RPZA and explicitly paletted SMC self-contained stills; exact explicit boundaries in CLI contract |
 | QuickTime affine/alpha | Nonsingular affine rotation/reflection/shear/fractional placement; straight and premultiplied white/black alpha, explicit approximate policy; source mask, clip and origin preserved |
 | QuickTime grayscale/description/OpColor | Explicit white-zero depths 34/36/40; retained neutral fiel/pasp/clap and optional zero terminator; modes 32/260 with recorded OpColor and approximate policy |
 | QuickTime uncompressed (`8201`) / other codecs | Explicitly unsupported; no silent substitute decoder |
@@ -105,7 +105,9 @@ an isolated transparent overlay.
 | `smc ` Apple Graphics | Self-contained 8-bit indexed blocks, explicit palette, initialized same-frame caches/repeats | Previous-frame skips, absent caches, default/resource palettes |
 | `jpeg` | Established decoder, 8-bit RGB/grayscale | CMYK and higher precision |
 | `png ` | Established decoder, expanded 8-bit RGB/grayscale/indexed PNG with optional alpha from PNG data | APNG and 16-bit channels |
-| `cvid`, `tiff`, `gif ` and other codec IDs | No decoder advertised | Unsupported; add only explicit still/layout contracts with bounded decoder evidence |
+| `tiff` | Classic II/MM, one IFD, strips, chunky top-left 8-bit gray/RGB/unassociated RGBA; none/PackBits/LZW/Deflate; predictor 1/2 | Multi-page/SubIFD/BigTIFF, tiles, palette TIFF, CMYK/Lab, other precision/layout/compression, associated alpha, ICC/color semantics and unknown tags |
+| `gif ` | One full-screen image, global/local palette, interlacing, transparent index, disposal 0/1 | Animation, partial frames, loop/application/plain-text extensions, user-input/disposal dependency, missing palette, non-square aspect |
+| `cvid` and other codec IDs | No decoder advertised | Unsupported; add only explicit still/layout contracts with bounded decoder evidence |
 | Shared image-description/placement | Base description/table, neutral progressive/square/full-centered hints, optional final zero terminator; source crop/mask, affine/alpha and recorded OpColor blend | Separate PICT matte, gamma/color-management/nonneutral or unknown extensions, perspective and other transfer modes (including image transparency key) |
 
 This is a documented-format inventory, **not** a measured frequency ranking;
@@ -294,6 +296,18 @@ identity checks; real native artifacts must separately pass the packaging gate.
 No classic-Mac emulator, historical fonts, printer environment, real-world user
 corpus or independent pixel oracle was supplied. Accordingly no validation of
 pixel-perfect classic output, text layout or general printer output is claimed.
+
+TIFF/GIF fixtures in `quicktime-stills.json` are original geometric images,
+independently encoded and decoded by Pillow 11.1.0 / libtiff 4.6.0 using
+`scripts/generate_still_fixtures.py`. Twenty valid cases cover every advertised
+compression, both TIFF byte orders, multiple strips, white-zero gray, prediction,
+RGBA, GIF local/global palettes, transparency and actual interlacing; six
+additional cases are explicit unsupported outcomes. Tests exercise complete
+truncation sweeps, excessive decompressed output, missing LZW/zlib endings,
+palette failures, page/frame ambiguity, metadata, dimensions and budgets.
+PDFium compares masked/scaled/rotated alpha layers and whole-composite OpColor
+fallback; SVG embedded PNG pixels are independently compared after placement
+and source masking. These are decoder/backend checks, not QuickTime fidelity.
 ImageMagick and QuickDrawViewer are not used as authoritative fidelity oracles.
 Native CI results must be read from actual workflow runs; merely adding Windows
 jobs is not evidence that Windows tests passed.
@@ -398,6 +412,14 @@ jobs is not evidence that Windows tests passed.
   INDEX/DICT layout, subroutine bias/calls, widths, masks, stacks and cubic operators.
   [OpenType CFF](https://learn.microsoft.com/en-us/typography/opentype/spec/cff)
   specifies single-font Type 2 tables and matching glyph counts.
+* [TIFF 6.0](https://download.osgeo.org/libtiff/doc/TIFF6.pdf), Adobe, June 1992:
+  classic IFDs, strips, photometric/sample/extra-sample tags, LZW, PackBits and
+  horizontal prediction. Deflate uses the interoperable zlib stream convention.
+  [GIF89a specification](https://www.w3.org/Graphics/GIF/spec-gif89a.txt),
+  CompuServe, July 1990: logical screens, palettes, graphic controls, image
+  descriptors, sub-blocks and LZW termination. Pinned Rust `tiff`, `gif`, `weezl`
+  and `flate2` provide established portable decoding; no implementation code
+  from Pillow/libtiff is copied.
 * [QuickDraw Appendix A footnote 2](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-461.html)
   identifies lineJustify's extra-character and total-style-run Fixed operands.
   [DrawJustified](https://preterhuman.net/macstuff/techpubs/mac/Text/Text-160.html)
@@ -432,7 +454,7 @@ contract, not a requirement to implement every imaginable historical extension.
 | Remaining family behavior | Documented synthetic-style properties and richer metadata inspection can be implemented if added to the supported contract | Negative version-0/1 values need a resolved representation contract or identified historical samples; current exact intrinsic bindings do not synthesize styles |
 | Outline fonts and encodings | Portable Roman static TrueType and name-keyed Type 2 CFF1 implemented; CID/seac, variable/color fonts and other explicit encodings remain optional expansions | Matching fonts and source encoding must be supplied. Classic metrics remain separate; non-Roman language/direction/shaping needs a new explicit contract |
 | Justification | Existing explicit spacing/scaling works; nonzero lineJustify is still rejected even for Roman | Need authoritative playback interaction of extra-character/total-run operands with recorded SpExtra/ChExtra, scaling, trailing spaces and state lifetime, or provenance-backed recording/output pairs. Bare NFNT has no inferred script |
-| Embedded images | Indexed/direct/grayscale raw/Animation, RPZA, SMC, neutral description extensions, affine/alpha and OpColor blend implemented; other codecs and nonneutral presentation remain work | Separate PICT matte byte layout, coordinate mapping and mode interaction need a verified specification or provenance-backed samples; movie matte atoms are not sufficient evidence |
+| Embedded images | Indexed/direct/grayscale raw/Animation, RPZA, SMC, single-page TIFF/single-image GIF, neutral description extensions, affine/alpha and OpColor blend implemented; other codecs and nonneutral presentation remain work | Separate PICT matte byte layout, coordinate mapping and mode interaction need a verified specification or provenance-backed samples; movie matte atoms are not sufficient evidence |
 | Preserved vector coverage | Shared diagonal/polygon/arc/complex-region frame paths implemented; destination-dependent operations still require full-composite fallback | Editable continuous geometry versus portable pixel-run presentation remains a fidelity choice; premultiplied source-over needs a representable precision contract before preserved-vector support |
 | Additional containers | Explicit native resource-fork access can build on current extraction; AppleSingle v2 is implemented | Filesystem behavior and deployment policy must be tested per platform |
 | Classic fidelity | Improve specification-backed coverage and differential backend checks now | Pixel equivalence requires an identified OS/QuickDraw/device/font setup, lawful reference outputs and a representative corpus |
@@ -443,13 +465,13 @@ fractional placement and whole-run compositing remain explicitly portable;
 historical chunk boundaries, cached font data, printer adjustments, global
 pattern phase and implicit system colors/fonts are not reconstructed.
 
-### Prioritized ordinary compatibility gaps after static CFF support
+### Prioritized ordinary compatibility gaps after TIFF/GIF support
 
 | Priority by documented scope (not guessed corpus frequency) | Next implementable work / boundary |
 | --- | --- |
 | 1. Remaining existing-record variants | QuickTime OpColor transparency key (36), non-square pixel/clean-aperture presentation under an explicit PICT mapping contract, and color-management/gamma handling. Neutral suffixes, explicit grayscale and image blend are now implemented |
 | 2. Existing standard text operations | Nonzero Roman lineJustify is blocked on the specific replay evidence above, not on CFF or general historical accuracy. PreserveGlyph/extended text state and additional CFF profiles require their own documented supported semantics |
-| 3. Additional named still codecs / containers | Evaluate portable bounded TIFF/GIF/Cinepak decoders for self-contained images; `8201` only after its specific PICT layout is established; native resource-fork access is deployment convenience |
+| 3. Additional named still codecs / containers | TIFF/GIF single-image profiles are implemented; Cinepak and additional TIFF variants remain optional work. `8201` only after its specific PICT layout is established; native resource-fork access is deployment convenience |
 | 4. New policies rather than guessed defaults | Default/resource image palettes require explicit identification/provenance; printer comment execution needs a defined supported comment contract; color management/device behavior is separate |
 
 Temporal files cannot become self-contained stills without supplying their

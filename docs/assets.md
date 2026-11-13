@@ -145,6 +145,14 @@ is separately reported and requires approximate fidelity; bitmap bindings and
 protocol 1 remain compatible. Packages include the locked portable shaper/parser
 and their redistribution notices, not platform font dependencies or user fonts.
 
+Embedded `tiff` and `gif ` are additive `quicktime_still_codecs` entries.
+`quicktime_tiff` and `quicktime_gif` describe the exact single-page/image,
+layout, palette/alpha and color-management boundaries. No frame-selection
+argument or silent first-frame behavior is introduced. The portable TIFF/GIF,
+LZW and Deflate libraries and their license notices travel inside the same
+native assets; Pillow/libtiff remain fixture-generation/test dependencies only.
+Font profiles, protocol 1 and asset schema 1 are unchanged.
+
 Archives use sorted members, a fixed 1980 timestamp, explicit Unix permissions,
 canonical JSON and stored (uncompressed) members. Identical binary, source/docs,
 dependency notices, and toolchain metadata produce **byte-identical archives**;

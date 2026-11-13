@@ -26,6 +26,10 @@ same-file = "1"
 tempfile = "3"
 jpeg-decoder = { version = "0.3", default-features = false }
 rustybuzz = "0.20.1"
+gif = "0.13.3"
+tiff = { version = "0.10.3", default-features = false, features = ["deflate", "lzw"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+weezl = "0.1.12"
 
 [dev-dependencies]
 jpeg-encoder = "0.6"

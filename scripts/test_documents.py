@@ -248,6 +248,52 @@ class Documents(unittest.TestCase):
                             matrix=[65536,0,0,0,65536,0,2*65536,65536,1<<30]))]
             self.compare_pdf_with_raster(operations,frame=(0,0,4,9),extra=("--fidelity","approximate"),policy="raster")
 
+    def test_tiff_gif_images_match_independent_pixels_and_export_masked_layers(self):
+        cases=json.loads((Path(__file__).resolve().parent.parent/"tests/fixtures/quicktime-stills.json").read_text())["cases"]
+        for case in cases:
+            with self.subTest(name=case["name"]):
+                if "error" in case:
+                    result,_=self.convert("png",operations=[(0x8200,quicktime(case["codec"].encode(),3,2,32,bytes.fromhex(case["packet"])))])
+                    self.assertEqual(result.returncode,5,result.stderr)
+                    continue
+                width,height=case["width"],case["height"]
+                rgba=bytes.fromhex(case["rgba"])
+                mode=256 if any(a!=255 for a in rgba[3::4]) else 0
+                args=(case["codec"].encode(),width,height,32,bytes.fromhex(case["packet"]))
+                result,target=self.convert("png",operations=[(0x8200,quicktime(*args,mode=mode))],frame=(0,0,height,width),extra=("--fidelity","approximate"))
+                self.assertEqual(result.returncode,0,result.stderr)
+                expected=bytes((v*rgba[i+3]+255*(255-rgba[i+3])+127)//255 for i in range(0,len(rgba),4) for v in rgba[i:i+3])
+                with Image.open(target) as image:
+                    self.assertEqual(image.convert("RGB").tobytes(),expected)
+                if case["name"] not in ["gif-transparent","gif-local","tiff-rgba-tiff_lzw","tiff-rgb-tiff_adobe_deflate"]:
+                    continue
+                mask=words(0,1,width,32767,height,1,width,32767,32767)
+                ops=[(0x31,words(0,0,12,20)),(0x0c,words(1,1)),(1,words(10,1,2,11,18)),
+                     (0x8200,quicktime(*args,mode=mode,mask=mask,
+                         matrix=[2*65536,0,0,0,2*65536,0,3*65536,2*65536,1<<30]))]
+                self.compare_pdf_with_raster(ops,frame=(0,0,12,20),extra=("--fidelity","approximate"))
+                result,target=self.convert("svg",operations=ops,frame=(0,0,12,20),extra=("--fidelity","approximate"))
+                self.assertEqual(result.returncode,0,result.stderr)
+                images=ET.parse(target).findall(".//{http://www.w3.org/2000/svg}image")
+                self.assertEqual(len(images),1)
+                url=images[0].get("href") or images[0].get("{http://www.w3.org/1999/xlink}href")
+                self.assertTrue(url.startswith("data:image/png;base64,"))
+                import base64
+                with Image.open(io.BytesIO(base64.b64decode(url.split(",",1)[1]))) as embedded:
+                    expected_layer=Image.frombytes("RGBA",(width,height),rgba).resize((width*2,height*2),Image.Resampling.NEAREST)
+                    expected_layer.paste((0,0,0,0),(0,0,2,height*2))
+                    self.assertEqual(embedded.size,expected_layer.size)
+                    self.assertEqual(embedded.convert("RGBA").tobytes(),expected_layer.tobytes())
+                rotated=ops[:-1]+[(0x8200,quicktime(*args,mode=mode,mask=mask,
+                    matrix=[0,65536,0,-65536,0,0,8*65536,2*65536,1<<30]))]
+                self.compare_pdf_with_raster(rotated,frame=(0,0,12,20),extra=("--fidelity","approximate"))
+                blend_mode=260 if mode else 32
+                blend_ops=ops[:-1]+[(0x1f,words(16384,32767,16384)),
+                                   (0x8200,quicktime(*args,mode=blend_mode))]
+                result,_=self.convert("pdf",operations=blend_ops,frame=(0,0,12,20),extra=("--fidelity","approximate"))
+                self.assertEqual(result.returncode,5,result.stderr)
+                self.compare_pdf_with_raster(blend_ops,frame=(0,0,12,20),extra=("--fidelity","approximate"),policy="raster")
+
     def convert(self, extension, policy="preserve", operations=None, extra=(), frame=(0,0,10,20)):
         source, target = self.root / "input.pict", self.root / f"output.{extension}"
         source.write_bytes(picture(operations or [(0x31, words(0, 0, 10, 20))], frame))

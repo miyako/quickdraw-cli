@@ -35,7 +35,7 @@ All other commands use the JSON contract below. There is deliberately no inert
 | `--max-input-bytes N` | 67108864 | Maximum file bytes, checked before and during reading |
 | `--max-pixels N` | 16000000 | Maximum frame, bitmap, region, and output pixel count, individually |
 | `--max-decoded-bytes N` | 134217728 | Cumulative decoded/scratch allocation accounting per parsing/rendering/vector phase; also bounds aggregate loaded font bytes |
-| `--max-operations N` | 100000 | Maximum parsed operations (excluding header and EndPic); also bounds container tables/resources and PNG/JPEG segment counts |
+| `--max-operations N` | 100000 | Maximum parsed operations (excluding header and EndPic); also bounds container tables/resources, codec framing, TIFF entries/strips and GIF blocks |
 | `--max-work N` | 100000000 | Parser input/decoding and renderer coverage work budgets, separately |
 
 Every limit must be positive. Increasing them is an explicit resource decision.
@@ -430,8 +430,8 @@ still fail under the raster policy.
 ### Embedded QuickTime still images
 
 Compressed QuickTime opcode `8200` supports `jpeg`, `png `, `raw `, `rle `,
-`rpza` and `smc `
-(spaces are part of the FourCC). JPEG/PNG use established Rust decoders; the
+`rpza`, `smc `, `tiff` and `gif `
+(spaces are part of the FourCC). JPEG/PNG/TIFF/GIF use established Rust decoders; the
 raw/Animation and block-codec readers are bounded implementations of published
 formats. Records require version 0, an 86-byte base image description, one frame,
 and no separate matte or external palette. An explicitly embedded indexed
@@ -442,6 +442,8 @@ the codec supplies them; block codecs use the description's dimensions.
 | Codec | Supported payload |
 | --- | --- |
 | `jpeg` | 8-bit RGB/grayscale; no CMYK or 16-bit samples |
+| `tiff` | One classic TIFF IFD; stripped, chunky, top-left 8-bit gray/RGB/explicit straight RGBA; uncompressed, PackBits, LZW or zlib Deflate |
+| `gif ` | One full-screen GIF87a/89a image; explicit global/local palette, interlacing, optional transparent index; no animation/disposal dependency |
 | `png ` | Expanded RGB/grayscale, with optional unassociated alpha; no 16-bit PNG or APNG |
 | `raw ` | Explicitly paletted depths 1/2/4/8, MSB-first indices; RGB555 (depth 16, high bit zero), RGB24, ARGB32; each scanline padded to even bytes; pad bits/bytes are ignored, not pixels |
 | `rle ` | Explicitly paletted depths 1/2/4/8; full-frame RGB555 (unused high bit ignored), RGB24, ARGB32; literal/repeat runs bounded to a row |
@@ -591,6 +593,53 @@ verified for this milestone do not establish the PICT-specific matte payload
 layout, coordinate mapping and interaction with the selected transfer mode;
 implementation needs that documentation or a provenance-backed example and
 expected result. No sample-independent polarity/layout guess is made.
+
+#### TIFF/GIF single-image and color contract
+
+The existing self-describing-codec image-description depth allowlist remains
+8/24/32/40, with color-table ID -1. TIFF/GIF payload headers determine their
+actual supported sample layout and palette; no external/default palette is used.
+
+TIFF accepts little- or big-endian classic TIFF, exactly one IFD, strips rather
+than tiles, unsigned 8-bit samples, and orientation 1 / chunky storage. Gray
+supports declared BlackIsZero or WhiteIsZero; RGBA requires ExtraSamples=2
+(unassociated alpha). Horizontal prediction is supported alongside predictor 1.
+Strip counts, offsets and lengths are checked before the linked `tiff` decoder.
+Compressed strips must decode to exactly their expected size: bounded `weezl`
+and `flate2` checks require LZW end codes / complete zlib streams, and PackBits
+expansion is checked without allocating its output. Extra decoded samples,
+truncated endings and trailing compressed data are errors.
+BigTIFF, additional IFDs/pages (including cycles), SubIFDs, tiles, palette TIFF,
+CMYK/Lab/YCbCr, associated/unspecified alpha, non-8-bit samples, alternate
+orientations and unlisted compression/predictor variants are explicitly unsupported.
+In particular, the linked TIFF decoder does not implement palette TIFF; this
+converter never interprets its indices as grayscale.
+
+GIF requires exactly one image matching the logical screen at offset zero.
+The image's local palette overrides the global palette; absent palettes or
+out-of-range pixel/transparency indices fail. A transparent index produces a
+straight alpha channel, not a fill using the GIF background index. Interlaced
+rows are decoded by the linked `gif` library. Only disposal 0/1, no user-input
+flag, and unspecified/square aspect are accepted. Animation, loop/application
+extensions, partial-screen frames, restore/background disposal, plain-text
+drawing and unknown extensions fail rather than selecting a frame. A single
+image's delay and bounded comments do not affect its still pixels.
+
+Both formats reject unsupported color-management semantics instead of silently
+applying or discarding a profile: TIFF ICC, transfer functions, chromaticities,
+nontrivial color tags and unknown tags are rejected; GIF application extensions
+(including color profiles) are rejected. TIFF descriptive ASCII metadata and
+valid resolution fields are neutral; placement/resolution comes from the PICT.
+No gamma/profile conversion is performed. Samples use the existing portable RGB
+contract, not device-color equivalence.
+
+Dimensions must equal the QuickTime description before pixel decoding. Framing,
+metadata, strip/block counts, compressed bytes (including aliased TIFF strips),
+output buffers and decoder workspace are charged to existing limits. Only one
+page/image is admitted, with no new selection option. TIFF/GIF transparency must
+use the existing recorded alpha transfer mode; nonopaque srcCopy still fails.
+Affine placement, clipping, source masks, OpColor and preserved-image/full-raster
+policies are unchanged. No protocol or font-profile change is introduced.
 
 Other transfer modes, projective matrices, rendering-affecting/unknown
 image-description extensions, planar raw formats, additional codecs

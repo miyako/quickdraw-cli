@@ -92,6 +92,7 @@ fn jpeg_extent(bytes: &[u8], limits: &Limits) -> Result<()> {
 }
 
 mod blocks;
+mod still;
 
 pub(crate) type Palette = [Option<[u8; 3]>; 256];
 
@@ -417,6 +418,8 @@ pub(crate) fn decode(
     let pixels = budget.limits.pixels(width, height)?;
     budget.work(pixels as u64 * 4 + bytes.len() as u64)?;
     match codec {
+        b"gif " => still::gif(bytes, width, height, budget),
+        b"tiff" => still::tiff(bytes, width, height, budget),
         b"rpza" | b"smc " => blocks::decode(codec, bytes, width, height, palette, budget),
         b"raw " | b"rle " => direct(codec, bytes, width, height, depth, palette, budget),
         b"png " => {
@@ -542,7 +545,7 @@ pub(crate) fn decode(
         _ => Err(Error::new(
             ErrorCode::Unsupported,
             format!(
-                "embedded QuickTime codec {codec:02x?} is not implemented (supported: jpeg, png , raw , rle , rpza, smc )"
+                "embedded QuickTime codec {codec:02x?} is not implemented (supported: jpeg, png , raw , rle , rpza, smc , tiff, gif )"
             ),
         )),
     }
