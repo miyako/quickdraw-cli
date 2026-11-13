@@ -13,6 +13,8 @@ pub struct BitmapFont {
     kern: i32,
     locations: usize,
     widths: usize,
+    fractional_widths: Option<usize>,
+    image_heights: Option<usize>,
 }
 
 fn word(data: &[u8], at: usize) -> Result<u16> {
@@ -32,10 +34,10 @@ impl BitmapFont {
             ));
         }
         let flags = word(data, 0)?;
-        if flags & 0x0fff != 0 {
+        if flags & 0x0ffc != 0 {
             return Err(Error::new(
                 ErrorCode::Unsupported,
-                "NFNT color, fractional-width and optional-height tables are not implemented",
+                "NFNT color/depth, synthetic fonts and reserved low flag bits are unsupported",
             ));
         }
         let (first, last) = (word(data, 2)?, word(data, 4)?);
@@ -60,7 +62,19 @@ impl BitmapFont {
         let count = usize::from(last - first) + 3;
         let high = (word(data, 10)? as i16).max(0) as usize;
         let widths = 16 + ((high << 16) | word(data, 16)? as usize) * 2;
-        if widths < locations + count * 2 || widths.checked_add(count * 2) != Some(data.len()) {
+        let mut end = widths + count * 2;
+        // Optional tables have one entry per glyph, including missing, but no terminator.
+        let fractional_widths = (flags & 2 != 0).then(|| {
+            let start = end;
+            end += (count - 1) * 2;
+            start
+        });
+        let image_heights = (flags & 1 != 0).then(|| {
+            let start = end;
+            end += (count - 1) * 2;
+            start
+        });
+        if widths < locations + count * 2 || end != data.len() {
             return Err(Error::new(
                 ErrorCode::Malformed,
                 "NFNT width table offset or extent is inconsistent",
@@ -83,6 +97,36 @@ impl BitmapFont {
                 "NFNT width table missing terminator",
             ));
         }
+        if let Some(table) = image_heights {
+            let mut budget = Budget::new(limits);
+            budget.work((row_bytes * 8 * height) as u64)?;
+            for i in 0..count - 1 {
+                let entry = word(data, table + i * 2)?;
+                let first_row = usize::from(entry >> 8);
+                let last_row = first_row + usize::from(entry & 255);
+                if last_row > height {
+                    return Err(Error::new(
+                        ErrorCode::Malformed,
+                        "NFNT image-height extent exceeds font rectangle",
+                    ));
+                }
+                let left = usize::from(word(data, locations + i * 2)?);
+                let right = usize::from(word(data, locations + (i + 1) * 2)?);
+                if left == right {
+                    continue;
+                }
+                for y in (0..first_row).chain(last_row..height) {
+                    for x in left..right {
+                        if data[26 + y * row_bytes + x / 8] & (0x80 >> (x % 8)) != 0 {
+                            return Err(Error::new(
+                                ErrorCode::Malformed,
+                                "NFNT image-height table excludes glyph ink",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         Ok(Self {
             data: data.into(),
             first,
@@ -93,6 +137,8 @@ impl BitmapFont {
             kern: word(data, 8)? as i16 as i32,
             locations,
             widths,
+            fractional_widths,
+            image_heights,
         })
     }
 
@@ -113,6 +159,13 @@ impl BitmapFont {
         }
         let left = word(&self.data, self.locations + index * 2)? as usize;
         let right = word(&self.data, self.locations + (index + 1) * 2)? as usize;
+        let rows = match self.image_heights {
+            Some(table) => {
+                let entry = word(&self.data, table + index * 2)?;
+                usize::from(entry >> 8)..usize::from(entry >> 8) + usize::from(entry & 255)
+            }
+            None => 0..self.height,
+        };
         Ok(Glyph {
             font: self,
             left,
@@ -120,7 +173,12 @@ impl BitmapFont {
             height: self.height,
             bearing: self.kern + (metrics >> 8) as i32,
             advance: (metrics & 255) as i32,
+            fractional_advance: self
+                .fractional_widths
+                .map(|table| word(&self.data, table + index * 2).map(|v| i64::from(v) * 256))
+                .transpose()?,
             ascent: self.ascent,
+            rows,
         })
     }
 }
@@ -132,10 +190,15 @@ pub(crate) struct Glyph<'a> {
     pub height: usize,
     pub bearing: i32,
     pub advance: i32,
+    pub fractional_advance: Option<i64>,
     pub ascent: i32,
+    rows: std::ops::Range<usize>,
 }
 impl Glyph<'_> {
     pub fn ink(&self, x: usize, y: usize) -> bool {
+        if !self.rows.contains(&y) {
+            return false;
+        }
         let bit = self.left + x;
         self.font.data[26 + y * self.font.row_bytes + bit / 8] & (0x80 >> (bit % 8)) != 0
     }
@@ -196,15 +259,19 @@ pub(crate) struct TextState {
     pub mode: u16,
     space: i32,
     extra: i32,
-    unsupported_ratio: bool,
+    ratio: [i16; 4],
+    pub fraction: u16,
+    pub fractional_widths: bool,
     unsupported_justify: bool,
     unsupported_glyphs: bool,
-    unsupported_fraction: bool,
+    scaling_disabled: bool,
 }
 impl TextState {
     pub fn new() -> Self {
         Self {
             mode: 1,
+            ratio: [1; 4],
+            fraction: 0x8000,
             ..Default::default()
         }
     }
@@ -216,44 +283,81 @@ impl TextState {
             6 => self.space = i32::from_be_bytes(data.try_into().expect("parsed Fixed")),
             0x0d => self.size = word(data, 0)?,
             0x10 => {
-                self.unsupported_ratio = word(data, 0)? == 0
-                    || word(data, 2)? == 0
-                    || word(data, 0)? != word(data, 4)?
-                    || word(data, 2)? != word(data, 6)?;
+                for (i, value) in self.ratio.iter_mut().enumerate() {
+                    *value = word(data, i * 2)? as i16;
+                }
+                if self.ratio[2] == 0 || self.ratio[3] == 0 {
+                    return Err(Error::new(
+                        ErrorCode::Malformed,
+                        "zero text ratio denominator",
+                    ));
+                }
             }
-            0x15 => self.unsupported_fraction = !matches!(word(data, 0)?, 0 | 0x8000),
+            0x15 => self.fraction = word(data, 0)?,
             0x16 => self.extra = word(data, 0)? as i16 as i32,
             0x2d => self.unsupported_justify = data.iter().any(|&b| b != 0),
-            0x2e => self.unsupported_glyphs = data[0] != 0 || data[2] != 0,
+            0x2e => {
+                if data.iter().any(|&b| b > 1) {
+                    return Err(Error::new(
+                        ErrorCode::Malformed,
+                        "glyphState requires Boolean bytes",
+                    ));
+                }
+                self.unsupported_glyphs = data[0] != 0;
+                self.fractional_widths = data[2] != 0;
+                self.scaling_disabled = data[3] != 0;
+                // PreserveGlyph only changes outline glyphs, not an explicit bitmap strike.
+            }
             _ => unreachable!("parsed text state"),
         }
         Ok(())
     }
     pub fn check(&self) -> Result<()> {
-        if self.unsupported_ratio
+        if self.ratio.iter().any(|&n| n <= 0)
             || self.unsupported_justify
             || self.unsupported_glyphs
-            || self.unsupported_fraction
-            || self.space & 0xffff != 0
+            || (self.scaling_disabled && self.scaled())
         {
             return Err(Error::new(
                 ErrorCode::Unsupported,
-                "NFNT text scaling, fractional positioning/spacing, justification or outline preference requires an unimplemented font layout policy",
+                "NFNT nonpositive/disabled scaling, script-specific justification or outline preference is unsupported",
             ));
         }
-        if !matches!(self.mode, 1 | 3) {
+        if !matches!(self.base_mode(), 0..=7 | 32..=39) || self.mode & !0x7f != 0 {
             return Err(Error::new(
                 ErrorCode::Unsupported,
-                "NFNT text currently supports srcOr and srcBic only",
+                "NFNT text supports source modes 0-7 and 32-39, optionally combined with text mask 64",
             ));
         }
         Ok(())
     }
-    pub fn spacing(&self, code: u8) -> i32 {
+    pub fn spacing(&self, code: u8) -> i64 {
         if code == 32 {
-            self.space >> 16
+            i64::from(self.space)
         } else {
-            self.extra
+            i64::from(self.extra) * 65536
         }
+    }
+    pub fn base_mode(&self) -> u16 {
+        self.mode & !64
+    }
+    pub fn masked(&self) -> bool {
+        self.mode & 64 != 0
+    }
+    pub fn portable_layout(&self) -> bool {
+        self.scaled()
+            || self.space & 0xffff != 0
+            || !matches!(self.fraction, 0 | 0x8000)
+            || self.fractional_widths
+    }
+    fn scaled(&self) -> bool {
+        self.ratio[0] != self.ratio[2] || self.ratio[1] != self.ratio[3]
+    }
+    pub fn scale(&self, fixed: i64, horizontal: bool) -> Result<i64> {
+        let i = usize::from(horizontal);
+        fixed
+            .checked_mul(i64::from(self.ratio[i]))
+            .map(|v| v.div_euclid(i64::from(self.ratio[i + 2])))
+            .ok_or_else(|| Error::new(ErrorCode::ResourceLimit, "text scaling overflow"))
     }
 }

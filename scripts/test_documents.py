@@ -49,12 +49,12 @@ class Documents(unittest.TestCase):
                                 capture_output=True, check=False)
         return result, target
 
-    def compare_pdf_with_raster(self, operations, frame=(0,0,10,20)):
-        result, target = self.convert("pdf", operations=operations, frame=frame)
+    def compare_pdf_with_raster(self, operations, frame=(0,0,10,20), extra=(), policy="preserve"):
+        result, target = self.convert("pdf", policy, operations=operations, frame=frame, extra=extra)
         self.assertEqual(result.returncode, 0, result.stderr)
         expected = self.root / "expected.png"
         result = subprocess.run([str(BINARY),"convert","--input",str(self.root/"input.pict"),
-                                 "--output",str(expected),"--overwrite"],capture_output=True)
+                                 "--output",str(expected),"--overwrite",*extra],capture_output=True)
         self.assertEqual(result.returncode,0,result.stderr)
         with closing(pdfium.PdfDocument(str(target))) as document, \
              closing(document[0]) as page, \
@@ -164,6 +164,31 @@ class Documents(unittest.TestCase):
         ops = [(0x31,words(0,0,10,20)),(0x0c,words(1,1)),
                (0x8200,struct.pack(">I",len(payload))+payload)]
         self.compare_pdf_with_raster(ops)
+
+    def test_fractional_scaled_nfnt_text_and_source_modes_match_pdfium_pixels(self):
+        font = words(0x1003,65,66,4,0,0,3,3,12,3,0,0,1)
+        font += bytes([0x5c,0,0xb4,0,0xfc,0]) + words(0,3,5,6)
+        font += words(4,0x0103,2,-1, 0x0280,0x0380,0x0200, 3,3,3)
+        (self.root / "font.nfnt").write_bytes(font)
+        mapping = self.root / "fonts.json"
+        mapping.write_text(json.dumps({"schema":1,"fonts":[{"id":7,"size":3,"path":"font.nfnt"}]}))
+        extra = ("--font-map",str(mapping),"--fidelity","approximate")
+        for mode in (0,1,3,4,5,7,36,64,68):
+            with self.subTest(mode=mode):
+                ops = [(0x1a,words(0,0,-1)),(0x31,words(-2,-3,8,17)),
+                       (0x1a,words(0,0,0)),(3,words(7)),(0x0d,words(3)),
+                       (0x2e,words(4)+bytes([0,1,1,0])),(0x10,words(2,3,1,2)),
+                       (0x15,words(0x4000)),(0x0c,words(2,1)),
+                       (1,words(10,0,1,9,15)),(5,words(mode)),
+                       (0x28,words(6,0)+bytes([3])+b"ABA"),
+                       (0x21,words(6,17))]
+                self.compare_pdf_with_raster(ops,(-2,-3,8,17),extra)
+                result, target = self.convert("svg",operations=ops,extra=extra,frame=(-2,-3,8,17))
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(len(ET.parse(target).findall(".//{http://www.w3.org/2000/svg}image")),0)
+        ops = [(0x31,words(0,0,10,20)),(3,words(7)),(0x0d,words(3)),
+               (5,words(2)),(0x28,words(3,0)+bytes([2])+b"AB")]
+        self.compare_pdf_with_raster(ops,extra=extra,policy="raster")
 
 
 if __name__ == "__main__":

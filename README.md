@@ -8,10 +8,12 @@ font search, or network services are used during conversion.
 
 **Not a fully capable QuickDraw emulator or a general archival migration tool.**
 Origin changes, rounded rectangles, arcs, pixel patterns, arithmetic/highlight
-modes and native-size one-bit NFNT text are implemented with explicit limitations.
+modes and one-bit NFNT text are implemented with explicit limitations. Text
+supports optional width/height tables, ratio scaling, fractional spacing and
+documented source transfer modes under an explicit portable policy.
 Resource forks, MacBinary and AppleDouble support explicit picture selection.
 Embedded JPEG/PNG still images support bounded decoding and restricted transforms.
-Other QuickTime codecs/transforms, outline/scaled/multibyte text and several
+Other QuickTime codecs/transforms, outline/multibyte text and several
 vector modes remain unsupported. Unsupported drawing fails instead of disappearing.
 Classic-Mac pixel fidelity has not been established.
 The separate `miyako/quickdraw` 4D component is not implemented here.

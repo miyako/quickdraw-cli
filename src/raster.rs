@@ -374,22 +374,27 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                     state.highlight = false;
                 }
                 Command::Text { .. } => {
-                    let glyphs = layout_text(&mut state, &op.command, options, &mut budget)?;
-                    state.validate(state.text.mode, false)?;
-                    for placed in glyphs {
-                        let area = placed.bounds.intersect(canvas.frame);
-                        if area.width() == 0 || area.height() == 0 {
-                            continue;
-                        }
-                        for y in area.top..area.bottom {
-                            for x in area.left..area.right {
-                                if placed.glyph.ink(
-                                    (x - placed.bounds.left) as usize,
-                                    (y - placed.bounds.top) as usize,
-                                ) {
-                                    canvas.apply(x, y, [0; 3], state.text.mode, &state);
-                                }
+                    text_policy(&state, options, &mut diagnostics, op.offset)?;
+                    let run = layout_text(&mut state, &op.command, options, &mut budget)?;
+                    let mode = state.text.base_mode();
+                    state.validate(mode, false)?;
+                    let mask = run.mask(canvas.frame, state.text.masked(), &mut budget)?;
+                    for y in mask.bounds.top..mask.bounds.bottom {
+                        for x in mask.bounds.left..mask.bounds.right {
+                            let ink = mask.ink(x, y);
+                            if !ink && state.text.masked() {
+                                continue;
                             }
+                            let source = if mode >= 32 {
+                                if ink {
+                                    state.foreground
+                                } else {
+                                    state.background
+                                }
+                            } else {
+                                [if ink { 0 } else { 255 }; 3]
+                            };
+                            canvas.apply(x, y, source, mode, &state);
                         }
                     }
                     diagnostics.push(Diagnostic::new("explicit_bitmap_font", format!("NFNT id={}, size={}, face={}; caller-supplied identity, no substitution", state.text.id, state.text.size, state.text.face), Some(op.offset)));
@@ -510,12 +515,99 @@ pub(crate) struct PlacedGlyph<'a> {
     pub bounds: Rect,
 }
 
+pub(crate) struct TextRun<'a> {
+    glyphs: Vec<PlacedGlyph<'a>>,
+    bounds: Rect,
+    advance_right: i32,
+}
+
+pub(crate) struct TextMask {
+    pub bounds: Rect,
+    ink: Vec<u8>,
+}
+impl TextMask {
+    pub fn ink(&self, x: i32, y: i32) -> bool {
+        self.ink
+            [(y - self.bounds.top) as usize * self.bounds.width() + (x - self.bounds.left) as usize]
+            != 0
+    }
+}
+impl TextRun<'_> {
+    pub fn mask(&self, viewport: Rect, masked: bool, budget: &mut Budget<'_>) -> Result<TextMask> {
+        let mut bounds = self.bounds.intersect(viewport);
+        if masked {
+            bounds.right = bounds.right.min(self.advance_right);
+        }
+        if bounds.width() == 0 || bounds.height() == 0 {
+            return Ok(TextMask {
+                bounds: Rect {
+                    right: bounds.left,
+                    bottom: bounds.top,
+                    ..bounds
+                },
+                ink: Vec::new(),
+            });
+        }
+        let count = bounds
+            .width()
+            .checked_mul(bounds.height())
+            .ok_or_else(|| Error::new(ErrorCode::ResourceLimit, "text mask size overflow"))?;
+        budget.allocate(count)?;
+        budget.work(count as u64)?;
+        let mut mask = TextMask {
+            bounds,
+            ink: vec![0; count],
+        };
+        for placed in &self.glyphs {
+            let area = placed.bounds.intersect(bounds);
+            if area.width() == 0 || area.height() == 0 {
+                continue;
+            }
+            budget.work((area.width() * area.height()) as u64)?;
+            for y in area.top..area.bottom {
+                for x in area.left..area.right {
+                    let sx = (i64::from(x) - i64::from(placed.bounds.left)) as usize
+                        * placed.glyph.width
+                        / placed.bounds.width();
+                    let sy = (i64::from(y) - i64::from(placed.bounds.top)) as usize
+                        * placed.glyph.height
+                        / placed.bounds.height();
+                    if placed.glyph.ink(sx, sy) {
+                        let i =
+                            (y - bounds.top) as usize * bounds.width() + (x - bounds.left) as usize;
+                        mask.ink[i] = 1;
+                    }
+                }
+            }
+        }
+        Ok(mask)
+    }
+}
+
+pub(crate) fn text_policy(
+    state: &State<'_>,
+    options: &RenderOptions,
+    diagnostics: &mut Vec<Diagnostic>,
+    offset: usize,
+) -> Result<()> {
+    state.text.check()?;
+    if state.text.portable_layout() || !matches!(state.text.mode, 1 | 3) {
+        require_approximate(
+            options,
+            diagnostics,
+            offset,
+            "text uses portable fixed-point layout/nearest-neighbor scaling or whole-run compositing, not historical Font Manager/stack-dependent rendering",
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn layout_text<'a>(
     state: &mut State<'_>,
     command: &Command,
     options: &'a RenderOptions,
     budget: &mut Budget<'_>,
-) -> Result<Vec<PlacedGlyph<'a>>> {
+) -> Result<TextRun<'a>> {
     let Command::Text {
         position,
         delta,
@@ -537,10 +629,24 @@ pub(crate) fn layout_text<'a>(
         },
     };
     state.text_start = baseline;
-    let mut x = baseline.x;
+    let pixel = |fixed: i64| {
+        i32::try_from(fixed.div_euclid(65536))
+            .map_err(|_| Error::new(ErrorCode::ResourceLimit, "text coordinate overflow"))
+    };
+    let mut x = i64::from(baseline.x) * 65536 + i64::from(state.text.fraction);
+    let mut bounds = Rect {
+        left: baseline.x,
+        right: baseline.x,
+        top: baseline.y,
+        bottom: baseline.y,
+    };
     if bytes.is_empty() {
         state.pen_location = baseline;
-        return Ok(Vec::new());
+        return Ok(TextRun {
+            glyphs: Vec::new(),
+            bounds,
+            advance_right: baseline.x,
+        });
     }
     let font = options
         .fonts
@@ -549,20 +655,51 @@ pub(crate) fn layout_text<'a>(
     let mut glyphs = Vec::with_capacity(bytes.len());
     for &code in bytes {
         let glyph = font.glyph(code)?;
-        budget.work((glyph.width * glyph.height + 1) as u64)?;
-        let left = add(x, glyph.bearing)?;
-        let top = add(baseline.y, -glyph.ascent)?;
-        let bounds = Rect {
-            left,
-            top,
-            right: add(left, glyph.width as i32)?,
-            bottom: add(top, glyph.height as i32)?,
+        let left_fixed = x + state.text.scale(i64::from(glyph.bearing) * 65536, true)?;
+        let top_fixed = i64::from(baseline.y) * 65536 + 0x8000
+            - state.text.scale(i64::from(glyph.ascent) * 65536, false)?;
+        let placed = Rect {
+            left: pixel(left_fixed)?,
+            top: pixel(top_fixed)?,
+            right: pixel(left_fixed + state.text.scale(glyph.width as i64 * 65536, true)?)?,
+            bottom: pixel(top_fixed + state.text.scale(glyph.height as i64 * 65536, false)?)?,
         };
-        x = add(x, add(glyph.advance, state.text.spacing(code))?)?;
-        glyphs.push(PlacedGlyph { glyph, bounds });
+        if placed.width() != 0 && placed.height() != 0 {
+            options.limits.pixels(placed.width(), placed.height())?;
+        }
+        budget.work((placed.width() * placed.height() + 1) as u64)?;
+        let advance = if state.text.fractional_widths {
+            glyph
+                .fractional_advance
+                .unwrap_or(i64::from(glyph.advance) * 65536)
+        } else {
+            i64::from(glyph.advance) * 65536
+        };
+        x = x
+            .checked_add(state.text.scale(advance + state.text.spacing(code), true)?)
+            .ok_or_else(|| Error::new(ErrorCode::ResourceLimit, "text advance overflow"))?;
+        let pen = pixel(x)?;
+        bounds.left = bounds.left.min(placed.left).min(pen);
+        bounds.right = bounds.right.max(placed.right).max(pen);
+        bounds.top = bounds.top.min(placed.top);
+        bounds.bottom = bounds.bottom.max(placed.bottom);
+        glyphs.push(PlacedGlyph {
+            glyph,
+            bounds: placed,
+        });
     }
-    state.pen_location = Point { x, y: baseline.y };
-    Ok(glyphs)
+    if bounds.width() != 0 && bounds.height() != 0 {
+        options.limits.pixels(bounds.width(), bounds.height())?;
+    }
+    state.pen_location = Point {
+        x: pixel(x)?,
+        y: baseline.y,
+    };
+    Ok(TextRun {
+        glyphs,
+        bounds,
+        advance_right: state.pen_location.x,
+    })
 }
 
 fn oval_contains(rect: Rect, x: i32, y: i32) -> bool {

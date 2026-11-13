@@ -32,7 +32,9 @@ emits an operation-offset warning for every accepted approximation.
 | v2 reserved opcodes with documented sizes | Retained/skipped with `reserved_opcode` diagnostics; unknown/v2-only opcodes in v1 fail |
 | Text state and font-name metadata | Exact font ID/size/face selection; font names retained without system lookup; unsupported layout settings fail at text use |
 | Length-prefixed text settings (`2D`, `2E`) | Known 8-byte lineJustify / 4-byte glyphState bodies; short bodies malformed, unknown extensions retained but unsupported, not guessed |
-| Text (`28`-`2B`) | Explicit native-size one-bit NFNT/FONT bindings; srcOr/srcBic; integer metrics and spacing; deltas from previous text start; advances graphics pen |
+| Text (`28`-`2B`) | Explicit one-bit NFNT/FONT bindings; source modes 0-7, arithmetic/transparent 32-39 and mask 64; unioned run coverage, deltas from previous text start, advanced graphics pen |
+| Text ratios/fractions (`06`, `10`, `15`, `16`, `2E`) | Positive independent ratios, signed Fixed SpExtra, PnLocHFrac, integer PICT ChExtra, explicit fractional-width selection; nonnative layout requires approximate policy |
+| NFNT optional tables | Bounded 8.8 glyph advances and top-row/image-height entries; no silently omitted ink |
 | Printer comments (`A0`, `A1`) | Raw bytes and kind retained; strict fails; approximate warns that comment semantics are ignored |
 | Origin (`0C`) | Horizontal/vertical delta; local clip/pen/last-shape state preserved; prior pixels do not move |
 | Oval size / rounded rectangles (`0B`, `40` family) | Approximate elliptical corners, clamped diameters, inset framing |
@@ -50,7 +52,7 @@ emits an operation-offset warning for every accepted approximation.
 | SVG / PDF | Explicit whole-picture raster or supported genuine-path policy; PDF 1.4 single page |
 | Native vector subset | Source-only tiled patterns and embedded bitmap placements, shapes/regions, axis-aligned lines and NFNT runs; destination-dependent modes and diagonal/polygon/arc/complex-region frames require explicit whole-picture raster |
 | Remaining embedded-image gaps | Mattes, nonopaque alpha, noncopy QuickTime modes, rotation/reflection/perspective, fractional edges, extended descriptions, animation, CMYK/16-bit images |
-| Outline/scaled/fractional/multibyte text, optional NFNT tables | Unsupported; no silent substitution |
+| Outline/multibyte/color text, FOND, script-specific justification | Unsupported; no silent substitution; scaling-disabled nonunit ratios and nonpositive ratios fail |
 | Classic screen emulation | Not implemented |
 
 ## Raster profile `portable_rgb_v1`
@@ -137,6 +139,14 @@ rounding. No compressed-image fixture is copied from another repository.
 PDFium independently rasterizes source-only bitmap/pattern PDF output and is
 compared with this project's raster interpreter for selected synthetic cases,
 including masks, negative picture origins and transparent pattern holes.
+Text cases cover all eight Boolean truth tables, foreground/background arithmetic,
+mask/background behavior, overlapping glyphs, fractional NFNT advance selection,
+signed space fractions, scaling/shrinking, negative positions, pen/origin/clip
+interactions, optional table extents and excluded-ink rejection. PDFium comparisons
+also cover nine source-only text/mask modes with nonunit ratios, fractional
+advances and explicit fonts; destination-dependent text is checked using the
+explicit whole-picture raster policy. Expected pixels are authored from the
+documented portable rules, not captured from a classic system.
 This is independent output-backend evidence, not independent QuickDraw fidelity.
 
 The tests' truth tables and selected expected pixels establish the declared
@@ -177,6 +187,14 @@ jobs is not evidence that Windows tests passed.
   [text transfer modes](https://dev.os9.ca/techpubs/mac/Text/Text-137.html)
 * FontForge `fontforge/macbinary.c` NFNT parser (read-only comparison):
   corroborates the width table offset relative to byte 16; no implementation copied.
+* [Apple, text scaling parameters](https://leopard-adc.pepas.com/documentation/mac/Text/Text-147.html),
+  [bitmap scaling](https://leopard-adc.pepas.com/documentation/mac/Text/Text-196.html),
+  [fractional width precedence](https://leopard-adc.pepas.com/documentation/mac/Text/Text-197.html),
+  [fractional-width defaults](https://leopard-adc.pepas.com/documentation/mac/Text/Text-208.html),
+  [SpaceExtra](https://leopard-adc.pepas.com/documentation/mac/Text/Text-153.html)
+* [Monobit NFNT reader](https://github.com/robhagemans/monobit/blob/master/monobit/storage/fontformats/apple/nfnt.py):
+  independently corroborates optional-table entry counts; format research only,
+  no implementation or fixtures copied.
 * [QuickDrawViewer](https://github.com/wiesmann/QuickDrawViewer), Apache-2.0:
   region transition interpretation and scope comparison. Its Apple-framework
   printer-style renderer is not this project's cross-platform backend or oracle.
@@ -185,9 +203,27 @@ jobs is not evidence that Windows tests passed.
 
 This is a usable **subset foundation**, not a fully capable conversion backbone.
 The versioned CLI and assets allow future wrapper integration work, but broad
-wrapper readiness remains limited by outline/scaled/multibyte font handling,
+wrapper readiness remains limited by outline/multibyte/color font handling,
 remaining QuickTime codecs/transforms, modes/containers, vector coverage and
 independent corpus/fidelity validation. Explicit bitmap fonts and supported
 vector paths are usable, not a claim of complete font or printer support. A wrapper must not
 hide those failures or discard success warnings. No wrapper component, release
 publication, code signing or notarization is included in this repository.
+
+### Next compatibility work versus external dependencies
+
+| Gap | What can proceed without a historical oracle | Evidence or decision still needed |
+| --- | --- | --- |
+| Font ingestion and FOND metrics | Reuse bounded container parsing for explicit font-resource selectors; parse documented family widths/kerning with synthetic cases | Caller-supplied fonts and correct family/face/size bindings; no automatic licensed-font acquisition |
+| Outline fonts and encodings | Add explicitly bound sfnt outlines and a documented shaping/encoding contract using established libraries | Source encoding/script and matching licensed font files must be known, not guessed from byte strings or names |
+| Justification | Implement documented simple-script spacing once the input encoding/script contract is explicit | Script identity and representative recorded lineJustify/ChExtra cases; a raw NFNT does not identify a Script Manager environment |
+| Embedded images | Add documented QuickTime raw/RLE still codecs, affine placement and defined alpha/matte compositing with bounded fixtures | Historical codec/color-management equivalence needs known originals and a decoder environment |
+| Preserved vector coverage | Add remaining pen/shape frames using QuickDraw coverage rather than generic SVG strokes; retain explicit full-composite fallback for destination modes | Editable-vector versus screen-pixel presentation remains a fidelity choice, not something to conceal |
+| Additional containers | AppleSingle and explicit native resource-fork access can build on current extraction | Filesystem behavior and deployment policy must be tested per platform |
+| Classic fidelity | Improve specification-backed coverage and differential backend checks now | Pixel equivalence requires an identified OS/QuickDraw/device/font setup, lawful reference outputs and a representative corpus |
+
+None of those missing oracle inputs prevents further ordinary compatibility
+implementation. They do prevent claiming complete legacy behavior. Current
+fractional placement and whole-run compositing remain explicitly portable;
+historical chunk boundaries, cached font data, printer adjustments, global
+pattern phase and implicit system colors/fonts are not reconstructed.

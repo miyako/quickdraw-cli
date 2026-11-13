@@ -354,6 +354,8 @@ fn capabilities() -> Value {
         "vector_policies": ["reject", "preserve", "raster"],
         "vector_profile": "portable_paths_v1",
         "font_map_schema": 1,
+        "text_profile": "portable_nfnt_v1",
+        "text_modes": {"base": [0,1,2,3,4,5,6,7,32,33,34,35,36,37,38,39], "mask_flag":64},
         "containers": ["auto", "raw", "file", "resource-fork", "macbinary", "appledouble"],
         "picture_selection": ["unique", "resource_id", "data_fork"],
         "quicktime_still_codecs": ["jpeg", "png "],
@@ -361,7 +363,7 @@ fn capabilities() -> Value {
         "raster_profile": "portable_rgb_v1",
         "fidelity": {
             "strict": "reject known approximations, not a pixel-identity guarantee",
-            "approximate": "allow portable curve/polygon/diagonal coverage and ignored printer comments with diagnostics",
+            "approximate": "allow portable curve/polygon/diagonal coverage, extended NFNT layout/compositing and ignored printer comments with diagnostics",
             "classic_oracle_validated": false
         },
         "supported": [
@@ -373,15 +375,19 @@ fn capabilities() -> Value {
             "origin_changes", "pixel_patterns", "explicit_highlight_color",
             "arithmetic_transfer_modes_32_to_39", "transparent_pattern_mode_44",
             "explicit_nfnt_single_byte_native_size_faces", "text_start_and_pen_advancement",
+            "nfnt_fractional_width_and_image_height_tables",
+            "positive_text_ratios", "fractional_space_extra_and_pen_position",
+            "text_boolean_arithmetic_transparency_and_mask",
             "svg_and_pdf_uniform_copy_geometry", "whole_picture_svg_pdf_raster",
             "bounded_resource_maps", "macbinary_I_II_III", "appledouble_v2",
             "explicit_picture_selection", "embedded_jpeg_png_axis_aligned_srcCopy",
             "vector_bitmap_copy_notCopy_transparent", "vector_tiled_patterns"
         ],
-        "approximate_only": ["ovals", "rounded_rectangles", "arcs", "polygons", "diagonal_lines", "complex_region_outlines", "printer_comments", "color_bitmap_boolean_modes"],
+        "approximate_only": ["ovals", "rounded_rectangles", "arcs", "polygons", "diagonal_lines", "complex_region_outlines", "printer_comments", "color_bitmap_boolean_modes", "text_scaling_fractional_layout_extended_modes"],
         "unsupported": [
-            "implicit_system_fonts", "outline_fonts", "scaled_or_fractional_text",
-            "multibyte_text", "nfnt_optional_tables", "text_modes_other_than_srcOr_srcBic",
+            "implicit_system_fonts", "outline_fonts", "multibyte_text", "color_nfnt",
+            "script_specific_line_justification", "nonpositive_or_disabled_text_scaling",
+            "grayishTextOr_not_recorded_in_pict", "font_family_tables",
             "dithering", "default_system_highlight_without_explicit_color",
             "vector_destination_dependent_modes",
             "vector_diagonal_polygon_arc_complex_region_frames",

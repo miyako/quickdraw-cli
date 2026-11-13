@@ -144,15 +144,65 @@ metadata and never trigger system lookup. Include every exact binding used.
 Initial recorded font ID/size are zero unless changed by picture opcodes; no
 host-specific default font or size is invented.
 
-Only extracted one-bit NFNT/FONT data with integer metrics is accepted. No
-resource-fork loader, outline font conversion, synthetic styling, rescaling,
+Only extracted one-bit NFNT/FONT data is accepted. No font-resource-fork loader,
+outline font conversion, synthetic styling, substitute-size selection,
 missing-glyph box or substitution is performed. Single-byte codes address glyphs
 directly; no Unicode decoding, Script Manager shaping or multibyte layout is
-implemented. Text supports srcOr/srcBic, native-size glyphs, integer space and
-nonspace additions. Scaling ratios, fractional spacing/positioning, nonzero
-line justification and outline/fractional-width preferences fail when text uses
-them. Each use reports `explicit_bitmap_font`. Input limits apply to the map and
+implemented. Each use reports `explicit_bitmap_font`. Input limits apply to the map and
 each resource; collection bytes and binding count are also bounded.
+
+#### Portable text profile `portable_nfnt_v1`
+
+NFNT optional glyph-width (flag bit 1) and image-height (bit 0) tables are
+supported. Each has an entry per encoded glyph plus the missing glyph, without
+the location/offset table's extra terminator. Widths are unsigned 8.8 values;
+image heights encode top-row offset and row count. Truncation, trailing bytes,
+out-of-range heights and tables excluding actual ink fail. Height hints never
+silently discard visible pixels or shrink the background transfer rectangle.
+Color/deep/synthetic NFNTs remain unsupported.
+
+`glyphState` fractional-widths selects the NFNT 8.8 advance table; when absent,
+integer NFNT advances are promoted to fixed point (Apple's documented no-family-
+table case). No FOND metrics are invented. `PreserveGlyph` concerns outline fonts
+and has no effect on the supplied bitmap strike. Outline preference and nonzero
+`lineJustify` remain explicit errors. Scaling-disabled glyph state with a nonunit
+ratio is rejected rather than choosing a substitute strike.
+
+Positive `TxRatio` values scale horizontal and vertical glyph bounds separately
+around the baseline, including bearings and advances. Zero denominators are
+malformed; zero/negative scales are unsupported. The exact binding still matches
+the recorded TxSize, not a guessed larger/smaller font. Native-size drawing needs
+no approximation permission; ratio scaling, fractional layout or text modes
+other than plain srcOr/srcBic require `--fidelity approximate` and emit an
+operation-offset `approximation` diagnostic.
+
+Layout accumulates signed 16.16 advances before taking integer pixel positions.
+Recorded `PnLocHFrac` seeds the horizontal accumulator for each positioned run;
+its default half-pixel value gives nearest-pixel placement. Negative positions
+use mathematical floor, not truncation toward zero. `SpExtra` retains its signed
+16.16 fraction and affects spaces only; the PICT `ChExtra` integer operand affects
+nonspaces only. Advance plus spacing is scaled horizontally before accumulation.
+Glyph bounds are rounded at their edges, with nearest-neighbor sampling within
+the resulting integer rectangle. This is a deterministic portable rule, not
+a claim about a particular Font Manager/device's rounding. Text deltas remain
+relative to the previous text start; the graphics pen receives the advanced
+integer position for subsequent line drawing. Scaling and masks are bounded
+even when most of a run lies offscreen.
+
+Text source modes 0-7 and arithmetic/transparent modes 32-39 are supported.
+The text mask flag 64 restricts the transfer to glyph ink and clips right
+overhang at the final advance. Arithmetic text uses the selected foreground and
+background RGB values and the existing OpColor requirements; transparency
+preserves pixels whose source equals the background. `grayishTextOr` is rejected:
+Apple documents that it is not recorded in PICTs.
+
+Glyphs are unioned into one bounded run mask before compositing. Nonmasked modes
+apply to both ink and the background/advance cells; mask mode leaves background
+pixels untouched. Overlapping glyphs therefore do not XOR each other away within
+one run. Separate text operations still composite in order against the complete
+destination. Apple's documented stack-dependent splitting can produce different
+historical results, hence the explicit portable policy. This does not recreate
+Script Manager, FOND kerning, printer spacing, or classic bitmap scaling.
 
 ### Preserved vector policy
 
@@ -161,7 +211,8 @@ rectangular frames and axis-aligned pens, approximate ellipse/rounded-rectangle
 paths, filled arc sectors/polygons, region runs, and supported NFNT glyph runs.
 Curves/polygons still require `--fidelity approximate`. Region and font paths
 preserve pixel-run edges; they are not smooth outline-font reconstruction or
-searchable PDF text. Overlapping glyph ink uses nonzero fill rather than XOR.
+searchable PDF text. Glyph ink is unioned before conversion to nonoverlapping
+pixel-run paths.
 Bit patterns support patCopy, notPatCopy and transparent; color pixel patterns
 copy directly, independent of pen mode. Native SVG/PDF tiling resources retain
 the original pattern phase through origin changes.
@@ -176,8 +227,11 @@ pixelated image-scaling hints at nonnative display sizes.
 
 Destination-dependent modes, diagonal lines and polygon/arc/complex-region
 framing currently fail in this backend.
-Colored Boolean text also fails unless srcOr foreground is black or srcBic
-background is white. Choose `raster` explicitly to use the complete raster
+Text srcCopy/notSrcCopy and transparent use source-only paths, including masks,
+scaled glyphs and explicit foreground/background colors. Boolean srcOr/notSrcOr
+requires black foreground; srcBic/notSrcBic requires white background.
+Other text modes require destination pixels and fail under `preserve`.
+Choose `raster` explicitly to use the complete raster
 interpreter instead. There is no automatic mixed fallback and no transparent
 overlay that loses the preceding destination. Unsupported raster semantics
 still fail under the raster policy.

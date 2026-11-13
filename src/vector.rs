@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::raster::{State, copy_color, layout_text, line_points, output_size};
+use crate::raster::{State, copy_color, layout_text, line_points, output_size, text_policy};
 use crate::{RenderOptions, output};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::fmt::Write;
@@ -453,44 +453,78 @@ pub fn export_vector(
                     }
                 }
                 Command::Text { .. } => {
-                    let glyphs = layout_text(&mut state, &op.command, options, &mut budget)?;
-                    rgb = Some(match state.text.mode {
-                        1 if state.foreground == [0; 3] => [0; 3],
-                        3 if state.background == [255; 3] => [255; 3],
+                    text_policy(&state, options, &mut diagnostics, op.offset)?;
+                    let run = layout_text(&mut state, &op.command, options, &mut budget)?;
+                    let mut colors = match state.text.base_mode() {
+                        0 => [Some(state.foreground), Some(state.background)],
+                        4 => [Some(state.background), Some(state.foreground)],
+                        1 if state.foreground == [0; 3] => [Some([0; 3]), None],
+                        3 if state.background == [255; 3] => [Some([255; 3]), None],
+                        5 if state.foreground == [0; 3] => [None, Some([0; 3])],
+                        7 if state.background == [255; 3] => [None, Some([255; 3])],
+                        36 => [
+                            if state.foreground == state.background {
+                                None
+                            } else {
+                                Some(state.foreground)
+                            },
+                            None,
+                        ],
                         _ => {
                             return Err(unsupported(
-                                "colored NFNT Boolean text requires destination pixels",
+                                "this NFNT text mode requires destination pixels; use explicit whole-picture raster",
                             ));
                         }
-                    });
-                    for placed in glyphs {
-                        if placed.glyph.width == 0 {
-                            continue;
-                        }
-                        for y in 0..placed.glyph.height {
-                            let mut x = 0;
-                            while x < placed.glyph.width {
-                                if !placed.glyph.ink(x, y) {
+                    };
+                    if state.text.masked() {
+                        colors[1] = None;
+                    }
+                    let viewport = picture.frame.translated(state.origin)?;
+                    let mask = run.mask(viewport, state.text.masked(), &mut budget)?;
+                    for (plane, color) in colors.into_iter().enumerate() {
+                        let Some(color) = color else { continue };
+                        let mut text_path = Path::default();
+                        budget.work((mask.bounds.width() * mask.bounds.height()) as u64)?;
+                        for y in mask.bounds.top..mask.bounds.bottom {
+                            let covered = |x| {
+                                mask.ink(x, y) == (plane == 0)
+                                    && state.clip.is_none_or(|clip| clip.contains(x, y))
+                            };
+                            let mut x = mask.bounds.left;
+                            while x < mask.bounds.right {
+                                if !covered(x) {
                                     x += 1;
                                     continue;
                                 }
                                 let start = x;
-                                while x < placed.glyph.width && placed.glyph.ink(x, y) {
+                                while x < mask.bounds.right && covered(x) {
                                     x += 1;
                                 }
-                                path.rect(
+                                text_path.rect(
                                     Rect {
-                                        top: placed.bounds.top + y as i32,
-                                        bottom: placed.bounds.top + y as i32 + 1,
-                                        left: placed.bounds.left + start as i32,
-                                        right: placed.bounds.left + x as i32,
+                                        top: y,
+                                        bottom: y + 1,
+                                        left: start,
+                                        right: x,
                                     },
                                     &mut budget,
                                 )?;
                             }
                         }
+                        emit(
+                            &mut content,
+                            &text_path,
+                            None,
+                            color,
+                            (-(viewport.left as i64), -(viewport.top as i64)),
+                            index + 1,
+                            pdf,
+                            &mut budget,
+                        )?;
                     }
                     diagnostics.push(Diagnostic::new("explicit_bitmap_font", format!("NFNT id={}, size={}, face={}; glyph pixel runs, no replacement or outline substitution", state.text.id, state.text.size, state.text.face), Some(op.offset)));
+                    state.highlight = false;
+                    return Ok(());
                 }
                 Command::Bitmap(bitmap) => {
                     if !matches!(bitmap.mode, 0 | 4 | 36) {

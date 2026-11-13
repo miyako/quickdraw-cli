@@ -109,6 +109,10 @@ Container ingestion adds `list-pictures`, `--resource-id` and `--data-fork`
 without changing the envelope. The JPEG decoder is linked into the CLI; the
 JPEG encoder, Pillow, pypdf and PDFium are test-only, not external runtime
 requirements or files installed beside the binary.
+Capabilities also advertise `text_profile: portable_nfnt_v1`; extended text
+layout/compositing uses the existing explicit `--fidelity approximate` policy.
+The font-map schema and exact binding rules remain unchanged. A wrapper must
+surface unsupported-font/encoding errors rather than retry with guessed fonts.
 
 Archives use sorted members, a fixed 1980 timestamp, explicit Unix permissions,
 canonical JSON and stored (uncompressed) members. Identical binary, source/docs,
