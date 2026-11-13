@@ -51,10 +51,26 @@ def verify(archive, expected_target, expected_sha256):
         expected = {
             "asset_schema": 1, "protocol": 1, "name": "quickdraw", "target": expected_target,
             "platform": platform, "architecture": architecture, "binary": executable,
-            "signed": False, "notarized": False,
+            "signed": expected_target == "universal-apple-darwin",
+            "notarized": expected_target == "universal-apple-darwin",
         }
+        if type(manifest.get("signed")) is not bool or type(manifest.get("notarized")) is not bool:
+            raise ValueError("signing markers must be booleans")
         if any(manifest.get(key) != value for key, value in expected.items()):
             raise ValueError("manifest platform, architecture or contract mismatch")
+        if expected_target == "universal-apple-darwin":
+            signing, notarization = manifest.get("signing"), manifest.get("notarization")
+            if manifest.get("architectures") != ["arm64", "x86_64"] or not isinstance(signing, dict) or not isinstance(notarization, dict):
+                raise ValueError("missing universal release evidence")
+            if (signing.get("identity_type") != "Developer ID Application"
+                    or signing.get("hardened_runtime") is not True or signing.get("secure_timestamp") is not True
+                    or not re.fullmatch(r"[A-Z0-9]{10}", signing.get("team_id", ""))
+                    or notarization.get("status") != "Accepted"
+                    or not re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", notarization.get("id", ""))
+                    or not re.fullmatch(r"[0-9a-f]{64}", notarization.get("submission_sha256", ""))
+                    or notarization.get("binary_sha256") != manifest.get("sha256")
+                    or notarization.get("stapled") is not False):
+                raise ValueError("invalid universal signing/notarization evidence")
         if set(names) != set(manifest["files"]) | {"manifest.json"}:
             raise ValueError("archive entries differ from manifest inventory")
         for name, entry in manifest["files"].items():

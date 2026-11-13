@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import struct
@@ -15,6 +16,7 @@ TARGETS = {
     "aarch64-apple-darwin": ("macos", "arm64", "quickdraw"),
     "x86_64-apple-darwin": ("macos", "x86_64", "quickdraw"),
     "x86_64-pc-windows-msvc": ("windows", "x86_64", "quickdraw.exe"),
+    "universal-apple-darwin": ("macos", "universal", "quickdraw"),
 }
 
 
@@ -28,6 +30,32 @@ def sha256(data):
 
 def check_binary(data, target):
     """Verify actual PE/Mach-O identity rather than trusting the asset filename."""
+    if target == "universal-apple-darwin":
+        if len(data) < 8 or data[:4] not in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+            raise ValueError("expected a universal Mach-O executable")
+        wide = data[:4] == b"\xca\xfe\xba\xbf"
+        size = 32 if wide else 20
+        count = struct.unpack_from(">I", data, 4)[0]
+        end = 8 + 2 * size
+        if count != 2 or len(data) < end:
+            raise ValueError("universal executable must contain exactly two slices")
+        targets = {0x100000C: "aarch64-apple-darwin", 0x1000007: "x86_64-apple-darwin"}
+        seen, ranges = set(), []
+        for index in range(2):
+            entry = struct.unpack_from(">IIQQII" if wide else ">IIIII", data, 8 + index * size)
+            cpu, subtype, offset, length, alignment = entry[:5]
+            if cpu not in targets or cpu in seen or (wide and entry[5] != 0):
+                raise ValueError("invalid universal architecture table")
+            if alignment > 31 or offset % (1 << alignment) or offset < end or length < 32 or offset + length > len(data):
+                raise ValueError("invalid universal slice extent or alignment")
+            if any(offset < stop and start < offset + length for start, stop in ranges):
+                raise ValueError("overlapping universal slices")
+            check_binary(data[offset:offset + length], targets[cpu])
+            if struct.unpack_from("<I", data, offset + 8)[0] != subtype:
+                raise ValueError("universal slice subtype mismatch")
+            seen.add(cpu)
+            ranges.append((offset, offset + length))
+        return
     if target.endswith("apple-darwin"):
         if len(data) < 32 or data[:4] != b"\xcf\xfa\xed\xfe":
             raise ValueError("expected a little-endian 64-bit Mach-O executable")
@@ -49,21 +77,24 @@ def check_binary(data, target):
 
 
 def notices(target):
-    metadata = json.loads(subprocess.check_output(
-        ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", target],
-        cwd=ROOT,
-    ))
-    nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
-    reached, pending = set(), [metadata["resolve"]["root"]]
-    while pending:
-        node = pending.pop()
-        if node not in reached:
-            reached.add(node)
-            pending.extend(dep["pkg"] for dep in nodes[node]["deps"])
+    targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"] if target == "universal-apple-darwin" else [target]
+    packages = {}
+    for native_target in targets:
+        metadata = json.loads(subprocess.check_output(
+            ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", native_target],
+            cwd=ROOT,
+        ))
+        nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+        reached, pending = set(), [metadata["resolve"]["root"]]
+        while pending:
+            node = pending.pop()
+            if node not in reached:
+                reached.add(node)
+                pending.extend(dep["pkg"] for dep in nodes[node]["deps"])
+        packages.update({p["id"]: p for p in metadata["packages"]
+                         if p["id"] in reached and p["id"] != metadata["resolve"]["root"]})
     files, inventory = {}, []
-    for package in sorted(metadata["packages"], key=lambda p: (p["name"], p["version"])):
-        if package["id"] not in reached or package["id"] == metadata["resolve"]["root"]:
-            continue
+    for package in sorted(packages.values(), key=lambda p: (p["name"], p["version"])):
         root = Path(package["manifest_path"]).parent
         selected = []
         for path in sorted(root.rglob("*")):
@@ -85,6 +116,7 @@ def notices(target):
     files["licenses/rust/COPYRIGHT-library.html"] = runtime_notice.read_bytes()
     files["licenses/dependencies.json"] = canonical_json({
         "scope": "target-filtered Cargo resolution including build tools; over-inclusive, not a runtime SBOM",
+        "targets": targets,
         "packages": inventory,
     })
     return files
@@ -100,11 +132,44 @@ def create_archive(path, files, executable):
             archive.writestr(info, data)
 
 
-def package(binary, target, output):
+def macos_release_evidence(binary, receipt_path, submission_path):
+    if not receipt_path or not submission_path:
+        raise ValueError("universal release requires accepted notarization evidence")
+    receipt = json.loads(receipt_path.read_text())
+    if not isinstance(receipt, dict) or receipt.get("status") != "Accepted" or not re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", receipt.get("id", "")):
+        raise ValueError("notarization submission was not accepted")
+    with zipfile.ZipFile(submission_path) as submitted:
+        if submitted.namelist() != ["quickdraw"] or submitted.read("quickdraw") != binary.read_bytes():
+            raise ValueError("notarized submission does not contain this exact signed binary")
+    subprocess.run(["codesign", "--verify", "--strict", "--all-architectures", str(binary)], check=True)
+    team = os.environ.get("QUICKDRAW_SIGNING_TEAM_ID", "")
+    for architecture in ("arm64", "x86_64"):
+        details = subprocess.run(["codesign", "--display", "--verbose=4",
+                                  "--architecture", architecture, str(binary)],
+                                 capture_output=True, text=True, check=True).stderr
+        if not re.fullmatch(r"[A-Z0-9]{10}", team) or f"TeamIdentifier={team}\n" not in details:
+            raise ValueError("signature does not match the required Developer team")
+        if ("Authority=Developer ID Application:" not in details
+                or not re.search(r"flags=0x[0-9a-fA-F]+\([^)]*\bruntime\b", details)
+                or "\nTimestamp=" not in details):
+            raise ValueError("release requires Developer ID, hardened runtime and a secure timestamp")
+    return {
+        "signed": True, "notarized": True,
+        "architectures": ["arm64", "x86_64"],
+        "signing": {"identity_type": "Developer ID Application", "team_id": team,
+                    "hardened_runtime": True, "secure_timestamp": True},
+        "notarization": {"id": receipt["id"], "status": "Accepted",
+                         "submission_sha256": sha256(submission_path.read_bytes()),
+                         "binary_sha256": sha256(binary.read_bytes()), "stapled": False},
+    }
+
+
+def package(binary, target, output, receipt_path=None, submission_path=None):
     binary = binary.resolve(strict=True)
     rustc = subprocess.check_output(["rustc", "-vV"], text=True)
     host = next(line.removeprefix("host: ") for line in rustc.splitlines() if line.startswith("host: "))
-    if host != target:
+    universal = target == "universal-apple-darwin"
+    if host != target and not (universal and host in ("aarch64-apple-darwin", "x86_64-apple-darwin")):
         raise ValueError(f"native packaging requires host {target}, got {host}")
     if not rustc.startswith("rustc 1.91.0 "):
         raise ValueError("packaging requires the pinned Rust 1.91.0 toolchain")
@@ -118,6 +183,9 @@ def package(binary, target, output):
         raise ValueError("unsupported package version syntax")
     data = binary.read_bytes()
     check_binary(data, target)
+    if not universal and (receipt_path or submission_path):
+        raise ValueError("signing evidence is only accepted for the universal macOS release")
+    release_evidence = macos_release_evidence(binary, receipt_path, submission_path) if universal else {}
     result = subprocess.run([str(binary), "--version"], check=True, capture_output=True)
     if result.stderr or json.loads(result.stdout) != {"protocol": 1, "version": version}:
         raise ValueError("binary protocol/version differs from this checkout")
@@ -142,6 +210,7 @@ def package(binary, target, output):
         "binary": executable, "sha256": sha256(data), "size": len(data),
         "source_revision": source, "rustc": rustc.strip(),
         "signed": False, "notarized": False,
+        **release_evidence,
         "files": {name: {"sha256": sha256(content), "size": len(content)} for name, content in sorted(files.items())},
     }
     files["manifest.json"] = canonical_json(manifest)
@@ -163,9 +232,11 @@ def main():
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--target", choices=TARGETS, required=True)
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
+    parser.add_argument("--notary-receipt", type=Path)
+    parser.add_argument("--notary-submission", type=Path)
     args = parser.parse_args()
     try:
-        print(package(args.binary, args.target, args.output))
+        print(package(args.binary, args.target, args.output, args.notary_receipt, args.notary_submission))
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         print(f"packaging failed: {error}", file=sys.stderr)
         return 1

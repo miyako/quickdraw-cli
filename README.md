@@ -40,6 +40,13 @@ vector modes remain unsupported. Unsupported drawing fails instead of disappeari
 Classic-Mac pixel fidelity has not been established.
 The separate `miyako/quickdraw` 4D component is not implemented here.
 
+Tagged CLI releases provide one **Developer ID signed, notarized universal
+macOS executable** (arm64 + x86_64) and one **Windows x64 executable**, with
+checksums, complete manifests, documentation and redistribution notices.
+Windows binaries are not Authenticode signed. See the
+[release/verification contract](docs/assets.md#signed-release-procedure-and-universal-contract);
+ordinary thin CI artifacts are not the signed release downloads.
+
 ```sh
 cargo build --locked --release
 target/release/quickdraw --version

@@ -1,16 +1,18 @@
 # CLI assets: schema 1
 
-The separate `miyako/quickdraw` component should consume these binaries rather
-than maintaining a second interpreter. No release has been published by the
-packaging scripts. The native CI workflow uploads build artifacts only.
+The separate `miyako/quickdraw` component consumes these binaries rather
+than maintaining a second interpreter. Ordinary native CI uploads build artifacts;
+the explicit signed-release workflow publishes the two release archives below.
 
 | Rust target | Platform | Architecture | Binary |
 | --- | --- | --- | --- |
 | `aarch64-apple-darwin` | `macos` | `arm64` | `bin/quickdraw` |
 | `x86_64-apple-darwin` | `macos` | `x86_64` | `bin/quickdraw` |
 | `x86_64-pc-windows-msvc` | `windows` | `x86_64` | `bin/quickdraw.exe` |
+| `universal-apple-darwin` (release) | `macos` | `universal` | `bin/quickdraw` |
 
-macOS assets are separate thin binaries, not a universal binary. Windows ARM64
+macOS **CI** assets are thin binaries; a macOS **release** combines the tested
+arm64/x86_64 slices before Developer ID signing and notarization. Windows ARM64
 and x86, Linux assets, installer packages and a 4D plugin bundle are not supplied.
 These are standalone CLI assets, not the component itself.
 
@@ -53,7 +55,8 @@ quickdraw-v0.1.0-aarch64-apple-darwin.manifest.json
 ```
 
 The ZIP has no outer directory. It includes `bin/quickdraw`, `manifest.json`,
-`LICENSE`, `README.md`, CLI/support/asset docs, `Cargo.lock`, and `licenses/`.
+`LICENSE`, `README.md`, CLI/support/asset/illustrated-feature docs and images,
+`Cargo.lock`, and `licenses/`.
 The sidecar manifest is byte-identical to the manifest inside the ZIP.
 Each manifest includes:
 
@@ -99,6 +102,13 @@ inventory, every member's size/hash, protocol/platform/architecture, and actual
 Mach-O/PE binary headers. This is an integrity check, not a signature check: a
 checksum downloaded from an untrusted source with the archive is not proof of
 authenticity. The caller must trust the source of the expected archive digest.
+
+For `universal-apple-darwin`, the verifier also checks both disjoint arm64/x86_64
+Mach-O slices, fat-header extents/alignment, and required signing/notary metadata.
+It does not cryptographically validate an Apple signature on non-macOS hosts.
+On macOS additionally run `codesign --verify --strict --all-architectures` and
+check the expected Developer team. Release publication performs those native
+checks after downloading the uploaded archive.
 
 A future wrapper should verify before extraction into an application-controlled
 directory, preserve executable permissions on macOS, select the host architecture
@@ -178,10 +188,58 @@ or a claim of exact linked-component coverage.
 
 ## Distribution limitations
 
-Artifacts have no publisher signature and are not notarized; `signed: false`
+Ordinary CI artifacts have no publisher signature and are not notarized; `signed: false`
 does not exclude a linker's automatic ad-hoc Mach-O signature. Platform quarantine, Gatekeeper and
-Windows trust policies may require additional release work. The CLI workflow has
-read-only repository permissions, no signing secrets and no release publishing
-step. CI downloads are retained for 30 days and are not a durable public release
-channel. Publishing versioned release assets and integrating the wrapper require
-a later readiness decision.
+Windows trust policies still apply. CI downloads expire after 30 days and are
+not a durable release channel. Windows release binaries are x64 but are not
+Authenticode signed. The standalone macOS binary/ZIP cannot carry a stapled
+ticket: accepted notarization is online, not a claim of offline Gatekeeper access.
+
+## Signed release procedure and universal contract
+
+The user-authorized release path is `.github/workflows/release.yml`, triggered
+by a new immutable `v<version>` tag matching Cargo.toml. It calls the existing
+native matrix on that tagged revision, verifies those archives, combines macOS
+slices with `lipo`, imports the explicitly configured Developer ID certificate
+into a temporary keychain, signs the final binary with hardened runtime and a
+secure timestamp, and requires accepted notarization. It packages the final
+bytes, compares duplicate packages, uploads a **draft**, downloads/verifies its
+assets and signature, then publishes. Existing releases are not overwritten.
+Temporary certificate/keychain files are removed on every exit.
+
+The six required repository secret names are
+`APPLE_DEVELOPER_ID_CERTIFICATE`, `APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD`,
+`KEYCHAIN_PASSWORD`, `NOTARYTOOL_APPLE_ID`, `NOTARYTOOL_TEAM_ID`,
+`NOTARYTOOL_PASSWORD`. They are configured by the user, never committed or
+printed. There is no ad-hoc signing fallback.
+
+Before an explicitly authorized release, run native CI on the chosen revision,
+review its exact version and release notes, confirm the tag/release does not
+already exist, then create/push that version's tag. A failed release workflow
+does not authorize moving an existing tag or replacing published bytes.
+
+Published names are `quickdraw-v<version>-universal-apple-darwin.zip` and
+`quickdraw-v<version>-x86_64-pc-windows-msvc.zip`, each with `.zip.sha256` and
+`.manifest.json` sidecars. Universal is a packaging identity, **not** a Rust
+compilation target. Protocol/font-map/asset schema stay at 1; macOS metadata is:
+
+```json
+{
+  "target": "universal-apple-darwin",
+  "platform": "macos",
+  "architecture": "universal",
+  "architectures": ["arm64", "x86_64"],
+  "binary": "bin/quickdraw",
+  "signed": true,
+  "notarized": true
+}
+```
+
+Additional `signing` and `notarization` objects retain the Developer team,
+runtime/timestamp flags, accepted submission ID, submission archive and final
+binary hashes, and `stapled:false`. Full file hashes/source revision remain
+mandatory. Consumers must copy the universal executable byte-for-byte; do not
+lipo/re-sign it or select one of the thin CI binaries. License notices cover
+the union of both macOS target resolutions. Packaging the same signed bytes is
+reproducible; fresh secure timestamps/notary submissions are not reproducible
+compiler output. The component remains a separate artifact and repository.

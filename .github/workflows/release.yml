@@ -1,0 +1,151 @@
+name: Signed CLI release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quickdraw-release
+  cancel-in-progress: false
+
+jobs:
+  native:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: native
+    runs-on: macos-15
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Verify immutable tag and version
+        run: |
+          python3 - <<'PY'
+          import os, subprocess, tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+          assert os.environ["RELEASE_TAG"] == f"v{version}", "tag/version mismatch"
+          assert subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip() == os.environ["GITHUB_SHA"]
+          with open(os.environ["GITHUB_ENV"],"a") as env:
+              env.write(f"RELEASE_VERSION={version}\n")
+          PY
+      - name: Install pinned packaging toolchain
+        run: rustup toolchain install 1.91.0 --profile minimal
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: quickdraw-*
+          path: dist/release-inputs
+      - name: Validate native builds and combine macOS slices
+        run: |
+          python3 scripts/prepare_release.py --inputs dist/release-inputs \
+            --work dist/release-work --final dist/release-final \
+            --revision "$GITHUB_SHA" --version "$RELEASE_VERSION"
+      - name: Import the configured Developer ID certificate and sign the final universal executable
+        env:
+          APPLE_DEVELOPER_ID_CERTIFICATE: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE }}
+          APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          certificate="$RUNNER_TEMP/quickdraw-signing.p12"
+          keychain="$RUNNER_TEMP/quickdraw-release.keychain-db"
+          trap 'rm -f "$certificate"' EXIT
+          printf '%s' "$APPLE_DEVELOPER_ID_CERTIFICATE" | base64 --decode > "$certificate"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/"Developer ID Application:/{print $2}')"
+          [[ "$identity" =~ ^[A-Fa-f0-9]{40}$ ]] || { echo "Expected exactly one Developer ID Application identity"; exit 1; }
+          codesign --force --sign "$identity" --options runtime --timestamp dist/release-work/quickdraw
+          codesign --verify --strict --all-architectures --verbose=2 dist/release-work/quickdraw
+          lipo -archs dist/release-work/quickdraw
+          dist/release-work/quickdraw --version
+      - name: Notarize the signed code
+        env:
+          NOTARYTOOL_APPLE_ID: ${{ secrets.NOTARYTOOL_APPLE_ID }}
+          NOTARYTOOL_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+          NOTARYTOOL_PASSWORD: ${{ secrets.NOTARYTOOL_PASSWORD }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import zipfile
+          with zipfile.ZipFile("dist/release-work/notary-submission.zip","x",zipfile.ZIP_DEFLATED) as archive:
+              archive.write("dist/release-work/quickdraw","quickdraw")
+          PY
+          xcrun notarytool submit dist/release-work/notary-submission.zip \
+            --apple-id "$NOTARYTOOL_APPLE_ID" --team-id "$NOTARYTOOL_TEAM_ID" \
+            --password "$NOTARYTOOL_PASSWORD" --wait --timeout 20m --output-format json \
+            > dist/release-work/notary-receipt.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          receipt = json.loads(Path("dist/release-work/notary-receipt.json").read_text())
+          assert receipt["status"] == "Accepted", f"Notarization status: {receipt['status']}"
+          print("Notarization accepted:", receipt["id"])
+          PY
+      - name: Package final signed bytes twice
+        env:
+          QUICKDRAW_SIGNING_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for output in dist/release-final dist/release-repro; do
+            python3 scripts/package.py --binary dist/release-work/quickdraw \
+              --target universal-apple-darwin --output "$output" \
+              --notary-receipt dist/release-work/notary-receipt.json \
+              --notary-submission dist/release-work/notary-submission.zip
+          done
+          cmp dist/release-final/*universal*.zip dist/release-repro/*universal*.zip
+      - name: Create draft, verify downloaded bytes, then publish
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" dist/release-final/* --verify-tag --draft \
+            --title "quickdraw $RELEASE_VERSION" --notes-file docs/release-notes.md
+          gh release download "$RELEASE_TAG" --dir dist/release-downloaded
+          python3 - <<'PY'
+          import os, sys, zipfile
+          from pathlib import Path
+          sys.path.insert(0,"scripts")
+          from verify_asset import verify
+          root=Path("dist/release-downloaded")
+          expected_files={p.name:p for p in Path("dist/release-final").iterdir()}
+          assert {p.name for p in root.iterdir()}==set(expected_files)
+          for name,path in expected_files.items():
+              assert (root/name).read_bytes()==path.read_bytes(), f"downloaded asset differs: {name}"
+          archives=sorted(root.glob("*.zip"))
+          assert len(archives)==2
+          for archive in archives:
+              target=archive.name.removeprefix(f"quickdraw-v{os.environ['RELEASE_VERSION']}-").removesuffix(".zip")
+              assert target in ("universal-apple-darwin","x86_64-pc-windows-msvc")
+              expected=Path("dist/release-final")/archive.name
+              assert archive.read_bytes()==expected.read_bytes(), "downloaded asset differs"
+              manifest=verify(archive,target,Path(str(archive)+".sha256").read_text().split()[0])
+              assert manifest["source_revision"]==os.environ["GITHUB_SHA"]
+              if target=="universal-apple-darwin":
+                  with zipfile.ZipFile(archive) as z:
+                      Path("dist/release-downloaded/quickdraw").write_bytes(z.read("bin/quickdraw"))
+          PY
+          codesign --verify --strict --all-architectures --verbose=2 dist/release-downloaded/quickdraw
+          gh release edit "$RELEASE_TAG" --draft=false
+      - name: Remove the temporary signing keychain
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/quickdraw-release.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/quickdraw-release.keychain-db"
+          fi
+          rm -f "$RUNNER_TEMP/quickdraw-signing.p12"
