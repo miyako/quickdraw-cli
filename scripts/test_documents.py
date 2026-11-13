@@ -35,6 +35,19 @@ def picture(operations, frame=(0, 0, 10, 20)):
     return data
 
 
+def quicktime(codec, width, height, depth, encoded, matrix=None, mode=0, mask=b""):
+    matrix = matrix or [65536,0,0, 0,65536,0, 0,0,1<<30]
+    payload = words(0) + struct.pack(">9i", *matrix) + bytes(12) + words(mode)
+    payload += words(0,0,height,width) + bytes(4) + struct.pack(">I",len(mask)) + mask
+    description = bytearray(86)
+    struct.pack_into(">I4s", description, 0, 86, codec)
+    struct.pack_into(">HH", description, 32, width, height)
+    struct.pack_into(">IH", description, 44, len(encoded), 1)
+    struct.pack_into(">Hh", description, 82, depth, -1)
+    payload += description + encoded
+    return struct.pack(">I",len(payload)) + payload
+
+
 class Documents(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -49,7 +62,7 @@ class Documents(unittest.TestCase):
                                 capture_output=True, check=False)
         return result, target
 
-    def compare_pdf_with_raster(self, operations, frame=(0,0,10,20), extra=(), policy="preserve"):
+    def compare_pdf_with_raster(self, operations, frame=(0,0,10,20), extra=(), policy="preserve", max_error=0):
         result, target = self.convert("pdf", policy, operations=operations, frame=frame, extra=extra)
         self.assertEqual(result.returncode, 0, result.stderr)
         expected = self.root / "expected.png"
@@ -62,7 +75,11 @@ class Documents(unittest.TestCase):
             actual = bitmap.to_pil().convert("RGB")
             with Image.open(expected) as image:
                 self.assertEqual(actual.size,image.size)
-                self.assertEqual(actual.tobytes(),image.convert("RGB").tobytes())
+                expected_bytes = image.convert("RGB").tobytes()
+                if max_error:
+                    self.assertLessEqual(max(abs(a-b) for a,b in zip(actual.tobytes(),expected_bytes)),max_error)
+                else:
+                    self.assertEqual(actual.tobytes(),expected_bytes)
 
     def test_pdf_xref_page_content_and_physical_transform(self):
         result, target = self.convert("pdf")
@@ -224,6 +241,82 @@ class Documents(unittest.TestCase):
                     result, target = self.convert("svg",operations=ops,extra=extra)
                     self.assertEqual(result.returncode,0,result.stderr)
                     self.assertEqual(len(ET.parse(target).findall(".//{http://www.w3.org/2000/svg}image")),0)
+
+
+    def test_affine_raw_animation_png_straight_alpha_layers_match_pdfium(self):
+        rgb = bytes([255,0,0, 0,255,0, 0,0,255, 255,255,0])
+        argb = bytes([128,255,0,0, 255,0,255,0, 0,0,0,255, 192,255,255,0])
+        encoded_png = io.BytesIO()
+        rgba = b"".join(argb[i+1:i+4]+argb[i:i+1] for i in range(0,len(argb),4))
+        Image.frombytes("RGBA",(2,2),rgba).save(encoded_png,format="PNG")
+        rle_body = bytes([1,2])+argb[:8]+bytes([255,1,2])+argb[8:]+bytes([255,0])
+        animation = struct.pack(">IH",6+len(rle_body),0)+rle_body
+        extra = ("--fidelity","approximate")
+        # Clockwise rotation, reflection, shear, fractional translation, shrink.
+        for matrix in [
+            [0,65536,0, -65536,0,0, 5*65536,2*65536,1<<30],
+            [-2*65536,0,0, 0,2*65536,0, 8*65536,65536,1<<30],
+            [2*65536,65536,0, 65536,2*65536,0, 2*65536,65536,1<<30],
+            [65536,0,0, 0,65536,0, 2*65536+16384,2*65536+49152,1<<30],
+            [32768,0,0, 0,32768,0, 2*65536+16384,2*65536+16384,1<<30],
+        ]:
+            for codec,depth,encoded,mode in [
+                (b"raw ",24,rgb,0), (b"raw ",32,argb,256),
+                (b"rle ",32,animation,256), (b"png ",32,encoded_png.getvalue(),256),
+            ]:
+                with self.subTest(matrix=matrix,codec=codec,mode=mode):
+                    # The source mask includes x=1 only; it rotates with the source.
+                    mask = words(0,1,2,32767, 2,1,2,32767,32767)
+                    ops = [(0x1a,words(0x1414,0x2828,0x3c3c)),(0x31,words(0,0,10,20)),
+                           (0x0c,words(1,1)),(1,words(10,1,1,9,13)),
+                           (0x8200,quicktime(codec,2,2,depth,encoded,matrix,mode)),
+                           (0x8200,quicktime(codec,2,2,depth,encoded,matrix,mode,mask))]
+                    self.compare_pdf_with_raster(ops,extra=extra,max_error=2 if mode else 0)
+                    result, target = self.convert("svg",operations=ops,extra=extra)
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertGreater(len(ET.parse(target).findall(".//{http://www.w3.org/2000/svg}image")),0)
+
+    def test_premultiplied_white_black_alpha_requires_complete_raster_fallback(self):
+        for mode,encoded in [(257,bytes([128,227,177,152])),(258,bytes([128,100,50,25]))]:
+            ops = [(0x1a,words(0x1414,0x2828,0x3c3c)),(0x31,words(0,0,10,20)),
+                   (0x8200,quicktime(b"raw ",1,1,32,encoded,mode=mode))]
+            extra = ("--fidelity","approximate")
+            result,_ = self.convert("pdf",operations=ops,extra=extra)
+            self.assertEqual(result.returncode,5)
+            self.assertIn(b"premultiplied",result.stderr)
+            self.compare_pdf_with_raster(ops,extra=extra,policy="raster")
+
+    def test_quickdraw_frame_paths_match_raster_without_generic_strokes(self):
+        polygon = words(26,0,0,7,12, 0,0, 7,12, 0,12, 7,0)
+        complex_region = words(44,0,0,8,14, 0,0,14,32767, 2,4,10,32767,
+                               6,4,10,32767, 8,0,14,32767,32767)
+        shapes = [(0x20,words(-2,-3,8,16)),(0x70,polygon),
+                  (0x60,words(0,0,8,14,30,-250)),(0x80,complex_region)]
+        extra = ("--fidelity","approximate")
+        for shape in shapes:
+            for pen in [(1,1),(2,3),(0,2)]:
+                for mode,pattern in [(8,bytes([255])*8),(8,bytes([0xaa,0x55])*4),
+                                     (12,bytes([0xaa,0x55])*4),(44,bytes([0xaa,0x55])*4)]:
+                    with self.subTest(shape=shape[0],pen=pen,mode=mode):
+                        ops = [(0x1a,words(0,0,-1)),(0x31,words(-2,-3,10,20)),
+                               (0x1a,words(0,0,0)),(0x0c,words(2,1)),(1,words(10,0,0,9,17)),
+                               (7,words(*pen)),(8,words(mode)),(9,pattern),shape]
+                        self.compare_pdf_with_raster(ops,frame=(-2,-3,10,20),extra=extra)
+                        result,target = self.convert("svg",operations=ops,extra=extra,frame=(-2,-3,10,20))
+                        self.assertEqual(result.returncode,0,result.stderr)
+                        text = target.read_text()
+                        tree = ET.parse(target)
+                        ns = {"s":"http://www.w3.org/2000/svg"}
+                        images = tree.findall(".//s:image",ns)
+                        self.assertEqual(images,tree.findall(".//s:pattern/s:image",ns))
+                        for image in images:
+                            self.assertEqual((image.get("width"),image.get("height")),("8","8"))
+                        if pattern == bytes([255])*8:
+                            self.assertEqual(images,[])
+                        self.assertNotIn("stroke=",text)
+        for shape in shapes:
+            result,_ = self.convert("pdf",operations=[(8,words(10)),shape],extra=extra)
+            self.assertEqual(result.returncode,5)
 
 
 if __name__ == "__main__":

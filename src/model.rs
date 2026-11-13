@@ -307,19 +307,101 @@ pub(crate) struct Bitmap {
     pub pixels: Pixels,
     pub source_mask: Option<Region>,
     pub raw_copy: bool,
+    pub affine: Option<Affine>,
+    pub alpha: Option<Vec<u8>>,
+}
+
+/// QuickTime row-vector affine matrix, retaining 16.16 integers.
+#[derive(Debug)]
+pub(crate) struct Affine {
+    pub a: i32,
+    pub b: i32,
+    pub c: i32,
+    pub d: i32,
+    pub tx: i32,
+    pub ty: i32,
+}
+impl Affine {
+    pub fn determinant(&self) -> i128 {
+        i128::from(self.a) * i128::from(self.d) - i128::from(self.b) * i128::from(self.c)
+    }
+    pub fn bounds(&self, source: Rect) -> Result<Rect> {
+        let mut xs = [0i64; 4];
+        let mut ys = [0i64; 4];
+        for (i, (x, y)) in [
+            (source.left, source.top),
+            (source.right, source.top),
+            (source.left, source.bottom),
+            (source.right, source.bottom),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            xs[i] = i64::from(x) * i64::from(self.a)
+                + i64::from(y) * i64::from(self.c)
+                + i64::from(self.tx);
+            ys[i] = i64::from(x) * i64::from(self.b)
+                + i64::from(y) * i64::from(self.d)
+                + i64::from(self.ty);
+        }
+        let edge = |values: [i64; 4], ceil: bool| -> Result<i32> {
+            let v = if ceil {
+                *values.iter().max().unwrap() + 65535
+            } else {
+                *values.iter().min().unwrap()
+            };
+            i32::try_from(v.div_euclid(65536)).map_err(|_| {
+                Error::new(
+                    ErrorCode::ResourceLimit,
+                    "QuickTime transformed bounds exceed coordinates",
+                )
+            })
+        };
+        Ok(Rect {
+            left: edge(xs, false)?,
+            right: edge(xs, true)?,
+            top: edge(ys, false)?,
+            bottom: edge(ys, true)?,
+        })
+    }
+    fn source_pixel(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+        let x = i128::from(x) * 65536 + 32768 - i128::from(self.tx);
+        let y = i128::from(y) * 65536 + 32768 - i128::from(self.ty);
+        let determinant = self.determinant();
+        let floor = |n: i128| {
+            let (n, d) = if determinant < 0 {
+                (-n, -determinant)
+            } else {
+                (n, determinant)
+            };
+            i32::try_from(n.div_euclid(d)).ok()
+        };
+        Some((
+            floor(x * i128::from(self.d) - y * i128::from(self.c))?,
+            floor(y * i128::from(self.a) - x * i128::from(self.b))?,
+        ))
+    }
 }
 impl Bitmap {
-    pub fn sample(&self, x: i32, y: i32) -> Option<[u8; 3]> {
+    pub fn sample(&self, x: i32, y: i32) -> Option<([u8; 3], u8)> {
         let dest = self.destination;
         if !dest.contains(x, y) || self.mask.as_ref().is_some_and(|m| !m.contains(x, y)) {
             return None;
         }
-        let sx = self.source.left
-            + (((x as i64 - dest.left as i64) * self.source.width() as i64) / dest.width() as i64)
-                as i32;
-        let sy = self.source.top
-            + (((y as i64 - dest.top as i64) * self.source.height() as i64) / dest.height() as i64)
-                as i32;
+        let (sx, sy) = if let Some(transform) = &self.affine {
+            transform.source_pixel(x, y)?
+        } else {
+            let sx = self.source.left
+                + (((x as i64 - dest.left as i64) * self.source.width() as i64)
+                    / dest.width() as i64) as i32;
+            let sy = self.source.top
+                + (((y as i64 - dest.top as i64) * self.source.height() as i64)
+                    / dest.height() as i64) as i32;
+            (sx, sy)
+        };
+        if !self.source.contains(sx, sy) {
+            return None;
+        }
         if self
             .source_mask
             .as_ref()
@@ -329,10 +411,11 @@ impl Bitmap {
         }
         let index = (sy - self.bounds.top) as usize * self.bounds.width()
             + (sx - self.bounds.left) as usize;
-        Some(match &self.pixels {
+        let rgb = match &self.pixels {
             Pixels::Mono(p) => [if p[index] == 0 { 255 } else { 0 }; 3],
             Pixels::Rgb(p) => [p[index * 3], p[index * 3 + 1], p[index * 3 + 2]],
-        })
+        };
+        Some((rgb, self.alpha.as_ref().map_or(255, |a| a[index])))
     }
 }
 

@@ -152,6 +152,24 @@ struct Canvas {
     rgb: Vec<u8>,
 }
 impl Canvas {
+    fn composite(&mut self, x: i32, y: i32, rgb: [u8; 3], alpha: u8, mode: u16, state: &State<'_>) {
+        if !self.frame.contains(x, y) || state.clip.is_some_and(|c| !c.contains(x, y)) {
+            return;
+        }
+        let index = ((y - self.frame.top) as usize * self.frame.width()
+            + (x - self.frame.left) as usize)
+            * 3;
+        for (dest, source) in self.rgb[index..index + 3].iter_mut().zip(rgb) {
+            let a = i32::from(alpha);
+            let foreground = match mode {
+                256 => i32::from(source) * a,
+                257 => (i32::from(source) - (255 - a)) * 255,
+                258 => i32::from(source) * 255,
+                _ => unreachable!("validated alpha mode"),
+            };
+            *dest = ((foreground + i32::from(*dest) * (255 - a) + 127) / 255) as u8;
+        }
+    }
     fn store(&mut self, x: i32, y: i32, rgb: [u8; 3], state: &State<'_>) {
         if self.frame.contains(x, y) && state.clip.is_none_or(|c| c.contains(x, y)) {
             let i = ((y - self.frame.top) as usize * self.frame.width()
@@ -427,9 +445,10 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                 }
                 Command::Bitmap(bitmap) => {
                     if bitmap.raw_copy {
-                        diagnostics.push(Diagnostic::new("embedded_still_image","Embedded still image decoded to opaque RGB; no historical codec/color-profile fidelity is claimed.",Some(op.offset)));
+                        image_policy(bitmap, options, &mut diagnostics, op.offset)?;
+                    } else {
+                        state.validate(bitmap.mode, false)?;
                     }
-                    state.validate(bitmap.mode, false)?;
                     if matches!(bitmap.pixels, Pixels::Rgb(_)) && (1..=7).contains(&bitmap.mode) {
                         require_approximate(
                             options,
@@ -827,19 +846,40 @@ fn draw(
     state: &State<'_>,
     budget: &mut Budget<'_>,
 ) -> Result<()> {
+    visit_shape(canvas.frame, verb, shape, state, budget, |x, y| {
+        canvas.patterned(x, y, verb, state);
+    })
+}
+
+fn visit_shape(
+    frame: Rect,
+    verb: Verb,
+    shape: &Shape,
+    state: &State<'_>,
+    budget: &mut Budget<'_>,
+    mut emit: impl FnMut(i32, i32),
+) -> Result<()> {
     if matches!(verb, Verb::Frame) && (state.pen.x == 0 || state.pen.y == 0) {
         return Ok(());
     }
     if let (Verb::Frame, Shape::Polygon { points, .. }) = (verb, shape) {
-        let mut mask = coverage_mask(canvas, budget)?;
+        let mut mask = coverage_mask(frame, budget)?;
         for (a, b) in points
             .iter()
             .zip(points.iter().cycle().skip(1))
             .take(points.len())
         {
-            stamp_line(&mut mask, canvas.frame, *a, *b, state.pen, budget)?;
+            stamp_line(&mut mask, frame, *a, *b, state.pen, budget)?;
         }
-        apply_mask(canvas, &mask, state, budget)?;
+        budget.work(mask.len() as u64)?;
+        for (i, &covered) in mask.iter().enumerate() {
+            if covered != 0 {
+                emit(
+                    frame.left + (i % frame.width()) as i32,
+                    frame.top + (i / frame.width()) as i32,
+                );
+            }
+        }
         return Ok(());
     }
     let bounds = match shape {
@@ -848,7 +888,7 @@ fn draw(
         Shape::Polygon { bounds, .. } => *bounds,
         Shape::Region(region) => region.bounds,
     };
-    let area = bounds.intersect(canvas.frame);
+    let area = bounds.intersect(frame);
     if area.width() == 0 || area.height() == 0 {
         return Ok(());
     }
@@ -916,18 +956,43 @@ fn draw(
                     continue;
                 }
             }
-            canvas.patterned(x, y, verb, state);
+            emit(x, y);
         }
     }
     Ok(())
 }
 
-fn coverage_mask(canvas: &Canvas, budget: &mut Budget<'_>) -> Result<Vec<u8>> {
-    let count = canvas.frame.width() * canvas.frame.height();
+fn coverage_mask(frame: Rect, budget: &mut Budget<'_>) -> Result<Vec<u8>> {
+    let count = budget.limits.pixels(frame.width(), frame.height())?;
     // Cumulative allocation budget also bounds repeated full-frame temporary masks.
     budget.allocate(count)?;
     budget.work(count as u64)?;
     Ok(vec![0; count])
+}
+
+pub(crate) fn frame_coverage(
+    frame: Rect,
+    shape: &Shape,
+    state: &State<'_>,
+    budget: &mut Budget<'_>,
+) -> Result<Vec<u8>> {
+    let mut mask = coverage_mask(frame, budget)?;
+    visit_shape(frame, Verb::Frame, shape, state, budget, |x, y| {
+        mask[(y - frame.top) as usize * frame.width() + (x - frame.left) as usize] = 1;
+    })?;
+    Ok(mask)
+}
+
+pub(crate) fn line_coverage(
+    frame: Rect,
+    from: Point,
+    to: Point,
+    pen: Point,
+    budget: &mut Budget<'_>,
+) -> Result<Vec<u8>> {
+    let mut mask = coverage_mask(frame, budget)?;
+    stamp_line(&mut mask, frame, from, to, pen, budget)?;
+    Ok(mask)
 }
 fn stamp_line(
     mask: &mut [u8],
@@ -940,8 +1005,9 @@ fn stamp_line(
     if pen.x == 0 || pen.y == 0 {
         return Ok(());
     }
-    let (mut x, mut y) = (from.x, from.y);
-    let (dx, dy) = ((to.x - from.x).abs(), -(to.y - from.y).abs());
+    let (mut x, mut y) = (i64::from(from.x), i64::from(from.y));
+    let (tx, ty) = (i64::from(to.x), i64::from(to.y));
+    let (dx, dy) = ((tx - x).abs(), -(ty - y).abs());
     let (sx, sy) = (
         if from.x < to.x { 1 } else { -1 },
         if from.y < to.y { 1 } else { -1 },
@@ -950,12 +1016,13 @@ fn stamp_line(
     loop {
         budget.work(1)?;
         let stamp = Rect {
-            top: y,
-            left: x,
-            bottom: y + pen.y,
-            right: x + pen.x,
-        }
-        .intersect(frame);
+            top: y.clamp(i64::from(frame.top), i64::from(frame.bottom)) as i32,
+            left: x.clamp(i64::from(frame.left), i64::from(frame.right)) as i32,
+            bottom: (y + i64::from(pen.y)).clamp(i64::from(frame.top), i64::from(frame.bottom))
+                as i32,
+            right: (x + i64::from(pen.x)).clamp(i64::from(frame.left), i64::from(frame.right))
+                as i32,
+        };
         budget.work((stamp.width() * stamp.height()) as u64)?;
         if stamp.width() != 0 {
             for py in stamp.top..stamp.bottom {
@@ -965,7 +1032,7 @@ fn stamp_line(
                 }
             }
         }
-        if x == to.x && y == to.y {
+        if x == tx && y == ty {
             break;
         }
         let twice = 2 * error;
@@ -1009,9 +1076,27 @@ fn line(
     if state.pen.x == 0 || state.pen.y == 0 {
         return Ok(());
     }
-    let mut mask = coverage_mask(canvas, budget)?;
-    stamp_line(&mut mask, canvas.frame, from, to, state.pen, budget)?;
+    let mask = line_coverage(canvas.frame, from, to, state.pen, budget)?;
     apply_mask(canvas, &mask, state, budget)
+}
+
+pub(crate) fn image_policy(
+    bitmap: &Bitmap,
+    options: &RenderOptions,
+    diagnostics: &mut Vec<Diagnostic>,
+    offset: usize,
+) -> Result<()> {
+    diagnostics.push(Diagnostic::new("embedded_still_image",
+        "Embedded still decoded with explicit transfer mode; no historical codec/color-profile fidelity is claimed.", Some(offset)));
+    if bitmap.affine.is_some() || bitmap.mode >= 256 {
+        require_approximate(
+            options,
+            diagnostics,
+            offset,
+            "QuickTime uses portable inverse pixel-center affine sampling and/or rounded 8-bit alpha composition, not historical device rendering",
+        )?;
+    }
+    Ok(())
 }
 
 fn blit(
@@ -1028,9 +1113,13 @@ fn blit(
     budget.work((area.width() * area.height()) as u64)?;
     for y in area.top..area.bottom {
         for x in area.left..area.right {
-            if let Some(color) = bitmap.sample(x, y) {
+            if let Some((color, alpha)) = bitmap.sample(x, y) {
                 if bitmap.raw_copy {
-                    canvas.store(x, y, color, state);
+                    if bitmap.mode == 0 {
+                        canvas.store(x, y, color, state);
+                    } else {
+                        canvas.composite(x, y, color, alpha, bitmap.mode, state);
+                    }
                 } else {
                     canvas.apply(x, y, color, bitmap.mode, state);
                 }

@@ -27,6 +27,32 @@ enum Segment {
 #[derive(Default)]
 struct Path(Vec<Segment>, bool);
 impl Path {
+    fn coverage(&mut self, frame: Rect, mask: &[u8], budget: &mut Budget<'_>) -> Result<()> {
+        budget.work(mask.len() as u64)?;
+        for (row, bytes) in mask.chunks_exact(frame.width()).enumerate() {
+            let mut x = 0;
+            while x < bytes.len() {
+                if bytes[x] == 0 {
+                    x += 1;
+                    continue;
+                }
+                let start = x;
+                while x < bytes.len() && bytes[x] != 0 {
+                    x += 1;
+                }
+                self.rect(
+                    Rect {
+                        left: frame.left + start as i32,
+                        right: frame.left + x as i32,
+                        top: frame.top + row as i32,
+                        bottom: frame.top + row as i32 + 1,
+                    },
+                    budget,
+                )?;
+            }
+        }
+        Ok(())
+    }
     fn add(&mut self, segment: Segment, budget: &mut Budget<'_>) -> Result<()> {
         budget.allocate(std::mem::size_of::<Segment>())?;
         budget.work(1)?;
@@ -345,9 +371,6 @@ pub fn export_vector(
                     pattern_verb = *verb;
                     path.1 = true;
                     rgb = color(&state, *verb)?;
-                    if matches!((verb, shape), (Verb::Frame, Shape::Arc { .. })) {
-                        return Err(unsupported("vector arc framing is not implemented"));
-                    }
                     if !matches!(shape, Shape::Rect(_) | Shape::Region(_)) {
                         if options.fidelity == Fidelity::Strict {
                             return Err(unsupported(
@@ -356,65 +379,77 @@ pub fn export_vector(
                         }
                         diagnostics.push(Diagnostic::new(
                             "approximation",
-                            "Continuous vector geometry; not classic pixel edge rules.",
+                            "Portable curve/polygon geometry; not classic pixel edge rules.",
                             Some(op.offset),
                         ));
                     }
-                    match shape {
-                        Shape::Polygon { points, .. } => {
-                            if matches!(verb, Verb::Frame) {
-                                return Err(unsupported(
-                                    "vector polygon framing is not implemented",
-                                ));
-                            }
-                            for (i, p) in points.iter().enumerate() {
-                                path.add(
-                                    if i == 0 {
-                                        Segment::Move(p.x as f64, p.y as f64)
-                                    } else {
-                                        Segment::Line(p.x as f64, p.y as f64)
-                                    },
-                                    &mut budget,
-                                )?;
-                            }
-                            path.add(Segment::Close, &mut budget)?;
+                    if matches!(verb, Verb::Frame)
+                        && matches!(
+                            shape,
+                            Shape::Arc { .. }
+                                | Shape::Polygon { .. }
+                                | Shape::Region(Region { mask: Some(_), .. })
+                        )
+                    {
+                        if options.fidelity == Fidelity::Strict {
+                            return Err(unsupported(
+                                "pixel-run vector frames require --fidelity approximate",
+                            ));
                         }
-                        Shape::Region(r) if r.mask.is_some() => {
-                            if matches!(verb, Verb::Frame) {
-                                return Err(unsupported(
-                                    "vector complex region framing is not implemented",
-                                ));
+                        diagnostics.push(Diagnostic::new("approximation",
+                            "Frame paths use shared portable QuickDraw rectangular-pen/pixel coverage, not generic SVG/PDF strokes or a classic oracle.", Some(op.offset)));
+                        let frame = picture.frame.translated(state.origin)?;
+                        let mask =
+                            crate::raster::frame_coverage(frame, shape, &state, &mut budget)?;
+                        path.coverage(frame, &mask, &mut budget)?;
+                    } else {
+                        match shape {
+                            Shape::Polygon { points, .. } => {
+                                for (i, p) in points.iter().enumerate() {
+                                    path.add(
+                                        if i == 0 {
+                                            Segment::Move(p.x as f64, p.y as f64)
+                                        } else {
+                                            Segment::Line(p.x as f64, p.y as f64)
+                                        },
+                                        &mut budget,
+                                    )?;
+                                }
+                                path.add(Segment::Close, &mut budget)?;
                             }
-                            path.region(r, &mut budget)?;
-                        }
-                        _ => {
-                            let r = match shape {
-                                Shape::Rect(r)
-                                | Shape::Oval(r)
-                                | Shape::RoundRect(r)
-                                | Shape::Arc { bounds: r, .. } => *r,
-                                Shape::Region(r) => r.bounds,
-                                _ => unreachable!(),
-                            };
-                            if matches!(verb, Verb::Frame) && (state.pen.x == 0 || state.pen.y == 0)
-                            {
-                                state.highlight = false;
-                                return Ok(());
+                            Shape::Region(r) if r.mask.is_some() => {
+                                path.region(r, &mut budget)?;
                             }
-                            path.outline(shape, r, &state, &mut budget)?;
-                            if matches!(verb, Verb::Frame) {
-                                let oval = state.oval;
-                                state.oval = Point {
-                                    x: (oval.x.min(r.width() as i32) - 2 * state.pen.x).max(0),
-                                    y: (oval.y.min(r.height() as i32) - 2 * state.pen.y).max(0),
+                            _ => {
+                                let r = match shape {
+                                    Shape::Rect(r)
+                                    | Shape::Oval(r)
+                                    | Shape::RoundRect(r)
+                                    | Shape::Arc { bounds: r, .. } => *r,
+                                    Shape::Region(r) => r.bounds,
+                                    _ => unreachable!(),
                                 };
-                                path.outline(
-                                    shape,
-                                    r.inset(state.pen.x, state.pen.y),
-                                    &state,
-                                    &mut budget,
-                                )?;
-                                state.oval = oval;
+                                if matches!(verb, Verb::Frame)
+                                    && (state.pen.x == 0 || state.pen.y == 0)
+                                {
+                                    state.highlight = false;
+                                    return Ok(());
+                                }
+                                path.outline(shape, r, &state, &mut budget)?;
+                                if matches!(verb, Verb::Frame) {
+                                    let oval = state.oval;
+                                    state.oval = Point {
+                                        x: (oval.x.min(r.width() as i32) - 2 * state.pen.x).max(0),
+                                        y: (oval.y.min(r.height() as i32) - 2 * state.pen.y).max(0),
+                                    };
+                                    path.outline(
+                                        shape,
+                                        r.inset(state.pen.x, state.pen.y),
+                                        &state,
+                                        &mut budget,
+                                    )?;
+                                    state.oval = oval;
+                                }
                             }
                         }
                     }
@@ -424,11 +459,18 @@ pub fn export_vector(
                     let (from, to) = line_points(&op.command, &state)?;
                     state.pen_location = to;
                     if from.x != to.x && from.y != to.y {
-                        return Err(unsupported(
-                            "vector diagonal pen coverage is not implemented",
-                        ));
-                    }
-                    if state.pen.x != 0 && state.pen.y != 0 {
+                        if options.fidelity == Fidelity::Strict {
+                            return Err(unsupported(
+                                "diagonal vector pen coverage requires --fidelity approximate",
+                            ));
+                        }
+                        diagnostics.push(Diagnostic::new("approximation",
+                            "Diagonal pen paths use unioned portable Bresenham rectangular stamps, not a generic stroke.", Some(op.offset)));
+                        let frame = picture.frame.translated(state.origin)?;
+                        let mask =
+                            crate::raster::line_coverage(frame, from, to, state.pen, &mut budget)?;
+                        path.coverage(frame, &mask, &mut budget)?;
+                    } else if state.pen.x != 0 && state.pen.y != 0 {
                         let r = Rect {
                             top: from.y.min(to.y),
                             left: from.x.min(to.x),
@@ -527,9 +569,14 @@ pub fn export_vector(
                     return Ok(());
                 }
                 Command::Bitmap(bitmap) => {
-                    if !matches!(bitmap.mode, 0 | 4 | 36) {
+                    if bitmap.raw_copy {
+                        crate::raster::image_policy(bitmap, options, &mut diagnostics, op.offset)?;
+                    }
+                    if !(matches!(bitmap.mode, 0 | 4 | 36)
+                        || (bitmap.raw_copy && bitmap.mode == 256))
+                    {
                         return Err(unsupported(
-                            "preserved bitmap placement requires srcCopy, notSrcCopy or transparent",
+                            "preserved bitmap requires copy/transparent or straight alpha; premultiplied alpha requires explicit whole-picture raster",
                         ));
                     }
                     if bitmap.mode == 4 && matches!(bitmap.pixels, Pixels::Rgb(_)) {
@@ -824,7 +871,7 @@ fn emit_bitmap(
             if state.clip.is_some_and(|c| !c.contains(x, y)) {
                 continue;
             }
-            if let Some(source) = bitmap.sample(x, y) {
+            if let Some((source, opacity)) = bitmap.sample(x, y) {
                 let i = (y - area.top) as usize * area.width() + (x - area.left) as usize;
                 if bitmap.mode == 36 && source == state.background {
                     continue;
@@ -842,7 +889,7 @@ fn emit_bitmap(
                     )
                 };
                 image.rgb[i * 3..i * 3 + 3].copy_from_slice(&rgb);
-                alpha[i] = 255;
+                alpha[i] = opacity;
             }
         }
     }

@@ -627,6 +627,8 @@ fn bitmap(r: &mut Reader<'_>, op: u16, version: u8, budget: &mut Budget<'_>) -> 
         pixels,
         source_mask: None,
         raw_copy: false,
+        affine: None,
+        alpha: None,
     })
 }
 
@@ -646,27 +648,22 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
     for v in &mut matrix {
         *v = q.u32()? as i32;
     }
-    if matrix[1] != 0
-        || matrix[2] != 0
-        || matrix[3] != 0
-        || matrix[5] != 0
-        || matrix[8] != 0x40000000
-        || matrix[0] <= 0
-        || matrix[4] <= 0
-    {
+    if matrix[2] != 0 || matrix[5] != 0 || matrix[8] != 0x40000000 {
         return Err(unsupported(
-            "QuickTime requires positive axis-aligned scale/translation; rotation, reflection and perspective are not implemented",
+            "QuickTime perspective/projective matrices are not implemented",
         ));
     }
     let matte_size = q.u32()? as usize;
     let matte = q.rect()?;
     if matte_size != 0 || matte.width() != 0 || matte.height() != 0 {
-        return Err(unsupported("QuickTime mattes are not implemented"));
+        return Err(unsupported(
+            "QuickTime separate matte payload/layout is not implemented; alpha modes are distinct",
+        ));
     }
     let mode = q.u16()?;
-    if mode != 0 {
+    if !matches!(mode, 0 | 256 | 257 | 258) {
         return Err(unsupported(
-            "QuickTime still images currently require srcCopy mode",
+            "QuickTime still images support srcCopy, straight alpha and white/black premultiplied alpha modes only",
         ));
     }
     let source = q.rect()?;
@@ -726,7 +723,12 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
     }
     d.take(32)?;
     let depth = d.u16()?;
-    if !matches!(depth, 8 | 24 | 32 | 40) || d.u16()? != 0xffff {
+    let supported_depth = if matches!(codec, b"raw " | b"rle ") {
+        matches!(depth, 16 | 24 | 32)
+    } else {
+        matches!(depth, 8 | 24 | 32 | 40)
+    };
+    if !supported_depth || d.u16()? != 0xffff {
         return Err(unsupported(
             "QuickTime image depth or external color table not implemented",
         ));
@@ -745,32 +747,89 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
             "QuickTime source rectangle outside decoded image",
         ));
     }
-    let coordinate = |value: i32, scale: i32, translation: i32| -> Result<i32> {
-        let fixed = value as i64 * scale as i64 + translation as i64;
-        if fixed.rem_euclid(65536) != 0 {
-            return Err(unsupported(
-                "QuickTime transformed source edges must be integral pixels",
-            ));
+    let transform = Affine {
+        a: matrix[0],
+        b: matrix[1],
+        c: matrix[3],
+        d: matrix[4],
+        tx: matrix[6],
+        ty: matrix[7],
+    };
+    if transform.determinant() == 0 {
+        return Err(malformed("singular QuickTime affine matrix"));
+    }
+    let destination = transform.bounds(source)?;
+    // Preserve the existing top-left sampling contract for integral positive axis placement.
+    let legacy = matrix[1] == 0
+        && matrix[3] == 0
+        && matrix[0] > 0
+        && matrix[4] > 0
+        && [
+            (source.left, matrix[0], matrix[6]),
+            (source.right, matrix[0], matrix[6]),
+            (source.top, matrix[4], matrix[7]),
+            (source.bottom, matrix[4], matrix[7]),
+        ]
+        .iter()
+        .all(|&(v, s, t)| (i64::from(v) * i64::from(s) + i64::from(t)) % 65536 == 0);
+    let decoded = crate::codec::decode(
+        codec,
+        q.take(compressed_size)?,
+        width,
+        height,
+        depth,
+        budget,
+    )?;
+    if mode == 0
+        && decoded
+            .alpha
+            .as_ref()
+            .is_some_and(|a| a.iter().any(|&a| a != 255))
+    {
+        return Err(unsupported(
+            "nonopaque QuickTime srcCopy is outside the portable profile; an alpha transfer mode must be recorded",
+        ));
+    }
+    if mode != 0 && decoded.alpha.is_none() {
+        return Err(unsupported(
+            "QuickTime alpha mode requires an explicit alpha channel",
+        ));
+    }
+    if matches!(mode, 257 | 258) && codec != b"raw " && codec != b"rle " {
+        return Err(unsupported(
+            "premultiplied QuickTime alpha supports explicit ARGB raw/Animation data only",
+        ));
+    }
+    if matches!(mode, 257 | 258) {
+        for (rgb, &alpha) in decoded
+            .rgb
+            .chunks_exact(3)
+            .zip(decoded.alpha.as_ref().expect("alpha checked"))
+        {
+            if rgb.iter().any(|&v| {
+                if mode == 258 {
+                    v > alpha
+                } else {
+                    v < 255 - alpha
+                }
+            }) {
+                return Err(malformed(
+                    "QuickTime color samples contradict recorded premultiplied alpha mode",
+                ));
+            }
         }
-        i32::try_from(fixed / 65536)
-            .map_err(|_| malformed("QuickTime transform coordinate overflow"))
-    };
-    let destination = Rect {
-        left: coordinate(source.left, matrix[0], matrix[6])?,
-        right: coordinate(source.right, matrix[0], matrix[6])?,
-        top: coordinate(source.top, matrix[4], matrix[7])?,
-        bottom: coordinate(source.bottom, matrix[4], matrix[7])?,
-    };
-    let rgb = crate::codec::decode(codec, q.take(compressed_size)?, width, height, budget)?;
+    }
     Ok(Command::Bitmap(Bitmap {
         bounds,
         source,
         destination,
         mode,
         mask: None,
-        pixels: Pixels::Rgb(rgb),
+        pixels: Pixels::Rgb(decoded.rgb),
         source_mask,
         raw_copy: true,
+        affine: (!legacy).then_some(transform),
+        alpha: decoded.alpha,
     }))
 }
 

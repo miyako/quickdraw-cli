@@ -129,6 +129,29 @@ fn output_is_deterministic_with_explicit_physical_size_and_pdf_bounds() {
 }
 
 #[test]
+fn quicktime_alpha_mode_is_not_accepted_as_a_copybits_mode() {
+    let mut p = Pict::new(2, 2, 1);
+    p.op(0x90, &mono(2, [0, 0, 1, 2], [0, 0, 1, 2], 256, &[0x80, 0]));
+    let picture = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
+    let options = RenderOptions {
+        fidelity: Fidelity::Approximate,
+        ..Default::default()
+    };
+    assert_eq!(
+        quickdraw::render(&picture, &options).unwrap_err().code,
+        ErrorCode::Unsupported
+    );
+    for format in [VectorFormat::Svg, VectorFormat::Pdf] {
+        assert_eq!(
+            export_vector(&picture, &options, 72., format)
+                .unwrap_err()
+                .code,
+            ErrorCode::Unsupported
+        );
+    }
+}
+
+#[test]
 fn indexed_color_tiles_are_preserved_without_pen_mode_or_foreground_tint() {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let mut tile = word(1);
@@ -192,4 +215,46 @@ fn preserved_bitmaps_reject_destination_modes_and_bound_resampled_buffers() {
             .code,
         ErrorCode::ResourceLimit
     );
+}
+
+#[test]
+fn diagonal_frame_paths_require_portable_policy_and_bound_offscreen_work() {
+    let mut p = Pict::new(2, 8, 8);
+    p.op(7, &words(&[2, 3])).op(0x20, &words(&[0, 0, 5, 6]));
+    let picture = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
+    assert_eq!(
+        export_vector(&picture, &RenderOptions::default(), 72., VectorFormat::Svg)
+            .unwrap_err()
+            .code,
+        ErrorCode::Unsupported
+    );
+    let options = RenderOptions {
+        fidelity: Fidelity::Approximate,
+        ..Default::default()
+    };
+    let svg = String::from_utf8(
+        export_vector(&picture, &options, 72., VectorFormat::Svg)
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(!svg.contains("<image"));
+    assert!(!svg.contains("stroke="));
+    assert!(svg.contains("L3.00000000"));
+    let mut p = Pict::new(2, 2, 2);
+    p.op(0x20, &words(&[i16::MIN, i16::MIN, i16::MAX, i16::MAX]));
+    let picture = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
+    let options = RenderOptions {
+        limits: Limits {
+            max_work: 500,
+            ..Default::default()
+        },
+        ..options
+    };
+    for format in [VectorFormat::Svg, VectorFormat::Pdf] {
+        let error = export_vector(&picture, &options, 72., format).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ResourceLimit);
+        assert!(error.message.contains("work"));
+        assert_eq!(error.opcode, Some(0x20));
+    }
 }

@@ -303,8 +303,14 @@ Binary image masks become PNG alpha/PDF soft masks, never an unqualified fallbac
 for a destination-dependent operation. SVG viewers may differ in honoring
 pixelated image-scaling hints at nonnative display sizes.
 
-Destination-dependent modes, diagonal lines and polygon/arc/complex-region
-framing currently fail in this backend.
+Diagonal lines and polygon/arc/complex-region frames now use the raster
+interpreter's shared coverage, emitted as nonoverlapping pixel-run rectangles
+under `--fidelity approximate`. Rectangular pen stamps are unioned before path
+creation; arcs exclude radii and complex regions use the same erosion kernel.
+These are editable paths, not generic SVG/PDF strokes or embedded frame images.
+Tiled pen patterns, clipping and origin phase remain intact. Coverage and
+serialization are bounded; even offscreen line traversal consumes work budget.
+Destination-dependent Boolean/arithmetic/highlight modes still fail in this backend.
 Text srcCopy/notSrcCopy and transparent use source-only paths, including masks,
 scaled glyphs and explicit foreground/background colors. Boolean srcOr/notSrcOr
 requires black foreground; srcBic/notSrcBic requires white background.
@@ -316,25 +322,77 @@ still fail under the raster policy.
 
 ### Embedded QuickTime still images
 
-Compressed QuickTime opcode `8200` supports `jpeg` and `png ` (the latter FourCC
-ends with a space) through established Rust decoders. Supported records use
-version 0, an 86-byte image description, one frame, no matte or external palette,
-and srcCopy. Positive axis-aligned 16.16 scales/translations are accepted when
-the transformed source edges are integral pixels; projective matrix entries use
-QuickTime's 2.30 representation and must encode an affine transform. Cropped
-source rectangles, source-region transitions, current clip and origin are
-preserved. Decoded RGB is copied directly, not tinted with CopyBits foreground
-and background colors.
+Compressed QuickTime opcode `8200` supports `jpeg`, `png `, `raw ` and `rle `
+(spaces are part of the FourCC). JPEG/PNG use established Rust decoders; the
+small raw/Animation direct-color readers are bounded implementations of published
+formats. Records require version 0, an 86-byte image description, one frame,
+and no separate matte or external palette. Dimensions must match codec headers.
 
-Dimensions must match the codec header and fit pixel/byte budgets. JPEG supports
-8-bit RGB/grayscale; PNG supports expanded 8-bit RGB/grayscale and fully opaque
-alpha. Truncated payloads, invalid compressed lengths and trailing image data
-fail. Nonopaque alpha, mattes, rotation/reflection/perspective, fractional edges,
-noncopy QuickTime modes, image-description extensions, CMYK/16-bit JPEG, 16-bit
-PNG, animation, other codecs and opcode `8201` remain unsupported. There is no
-QuickTime runtime, external decoder process, codec guessing or color-profile
-conversion. Decoder-internal work is not a wall-clock guarantee; retain an
-external timeout and process-memory limit for untrusted batches.
+| Codec | Supported payload |
+| --- | --- |
+| `jpeg` | 8-bit RGB/grayscale; no CMYK or 16-bit samples |
+| `png ` | Expanded RGB/grayscale, with optional unassociated alpha; no 16-bit PNG or APNG |
+| `raw ` | Packed RGB555 (depth 16, high bit zero), RGB24, ARGB32; each scanline padded to even bytes; pad bytes are ignored, not pixels |
+| `rle ` | Animation full-frame RGB555 (unused high bit ignored), RGB24, ARGB32; literal/repeat runs bounded to a row |
+
+Animation's big-endian chunk size must match exactly, without unknown size
+flags. Header 0 is supported; header 8 is accepted only for start line zero,
+all image rows, and zero reserved fields. Every pixel must be supplied by the
+still: nonzero skips, early row/frame endings, partial updates and unchanged
+frames fail instead of inventing prior-frame pixels. A zero-distance skip is
+permitted. A single final zero terminator is optional after all rows; trailing
+data fails. Palette/grayscale/packed low-depth Animation variants remain
+unsupported. Run-command count, decoded bytes, pixels and work are bounded.
+
+Nonsingular 16.16 affine matrices support rotation, reflection, shear and
+fractional edges/translations under `--fidelity approximate`. Projective entries
+must be `(0,0,1)` in QuickTime's 2.30 format; singular matrices are malformed.
+Transformed source corners give a floor/ceiling destination bounding box.
+Each destination pixel center is inverse-mapped with exact integer rational
+arithmetic, then floored to its containing source pixel. Samples outside the
+source rectangle or source-region mask do not draw; the destination bounding box
+is not painted as a rectangle. Current clip and origin apply afterward.
+Existing positive axis-aligned placements with integral source edges retain
+their original top-left nearest-neighbor sampling, including shrink behavior.
+This compatibility distinction is advertised, not a historical filter claim.
+
+| Recorded transfer mode | Portable behavior |
+| --- | --- |
+| 0, srcCopy | Copy RGB directly, without CopyBits foreground/background tint; nonopaque channels still fail rather than silently discarding alpha |
+| 256, straight alpha | Blend source RGB and existing destination by the explicit alpha channel |
+| 257, premultiplied white | Remove the recorded white-background contribution, then composite against existing destination |
+| 258, premultiplied black | Add the existing destination contribution to the premultiplied source |
+
+All alpha modes require an explicit channel and `--fidelity approximate`.
+Premultiplied modes require ARGB raw/Animation; PNG alpha is unassociated and
+is not reinterpreted. Contradictory premultiplied channel ranges are malformed.
+Composition uses 8-bit channels and round-to-nearest division by 255, without
+ICC/gamma conversion. Mode 256 computes `(source*alpha + dest*(255-alpha)+127)/255`;
+mode 258 uses `source*255` for its source term; mode 257 uses
+`(source-(255-alpha))*255`. Integer division is applied after summation.
+This acts against all preceding drawing, never an empty substitute background.
+
+Preserved SVG/PDF shares the exact placement and source-mask sampler. Straight
+alpha becomes PNG alpha/PDF soft masks on just the image layer; other geometry
+stays vector. Native-size pixels are baked into that layer, not emitted as a
+continuously transformed original image. Premultiplied modes require explicit
+whole-picture `--vector-policy raster`, avoiding lossy unpremultiplication or
+incorrect transparent overlays. PDF viewers can differ by channel rounding
+for partial alpha; that is not a classic QuickDraw fidelity claim.
+
+Separate `matteSize`/`matteRect` payloads still fail explicitly. They are not
+equivalent to premultiplied white/black alpha or movie `kmat` atoms. The sources
+verified for this milestone do not establish the PICT-specific matte payload
+layout, coordinate mapping and interaction with the selected transfer mode;
+implementation needs that documentation or a provenance-backed example and
+expected result. No sample-independent polarity/layout guess is made.
+
+Other transfer modes (including alpha blend with OpColor), projective matrices,
+image-description extensions, planar/paletted raw formats, additional codecs
+and opcode `8201` remain unsupported. There is no runtime QuickTime, external
+decoder process, network lookup, codec guessing or color-profile conversion.
+Decoder-internal work is not a wall-clock guarantee; retain an external timeout
+and process-memory limit for untrusted batches.
 
 ## JSON and exit codes
 

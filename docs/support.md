@@ -45,14 +45,15 @@ emits an operation-offset warning for every accepted approximation.
 | Highlight (`1C`-`1E`, modes 50/52/58/60) | Exchanges background/highlight colors, leaves other destination colors intact; one-shot HiliteMode; explicit HiliteColor or CLI highlight required |
 | Transparent pattern mode 44 | Whole-pixel background keying |
 | Dithering / other extended modes | Unsupported; never silently mapped to copy |
-| QuickTime compressed (`8200`) | JPEG/PNG still decoding; restricted positive scale/translation, integral edges, source crop/mask, clip/origin and direct RGB srcCopy |
+| QuickTime compressed (`8200`) | JPEG/PNG and direct RGB555/RGB24/ARGB32 raw/Animation stills; exact explicit boundaries in CLI contract |
+| QuickTime affine/alpha | Nonsingular affine rotation/reflection/shear/fractional placement; straight and premultiplied white/black alpha, explicit approximate policy; source mask, clip and origin preserved |
 | QuickTime uncompressed (`8201`) / other codecs | Explicitly unsupported; no silent substitute decoder |
 | Unknown opcodes / unknown length layouts | Fail with offset and opcode; no recovery by guessing |
 | AppleSingle/AppleDouble v1 / packed MacBinary / native resource-fork filesystem access | Unsupported; supply a supported file container |
 | PNG | Opaque RGB output |
 | SVG / PDF | Explicit whole-picture raster or supported genuine-path policy; PDF 1.4 single page |
-| Native vector subset | Source-only tiled patterns and embedded bitmap placements, shapes/regions, axis-aligned lines and NFNT runs; destination-dependent modes and diagonal/polygon/arc/complex-region frames require explicit whole-picture raster |
-| Remaining embedded-image gaps | Mattes, nonopaque alpha, noncopy QuickTime modes, rotation/reflection/perspective, fractional edges, extended descriptions, animation, CMYK/16-bit images |
+| Native vector subset | Tiled patterns, copied/straight-alpha image layers, shapes/regions and NFNT runs; diagonal/polygon/arc/complex-region frames use shared pixel-run coverage |
+| Remaining embedded-image gaps | Separate matte payloads, projective matrices, other transfer modes, extensions, temporal/skipped-pixel Animation, paletted/grayscale RLE, planar/paletted raw, CMYK/16-bit-channel images; preserved premultiplied alpha needs whole-picture raster |
 | Outline/multibyte/color text, synthetic FOND styles, script-specific justification | Unsupported; no silent substitution; scaling-disabled nonunit ratios and nonpositive ratios fail |
 | Classic screen emulation | Not implemented |
 
@@ -149,6 +150,19 @@ advances and explicit fonts; destination-dependent text is checked using the
 explicit whole-picture raster policy. Expected pixels are authored from the
 documented portable rules, not captured from a classic system.
 This is independent output-backend evidence, not independent QuickDraw fidelity.
+Raw/Animation fixtures exercise scanline padding, channels, repeats/literals,
+full-update headers, delta rejection, truncation, limits and malformed runs.
+Affine cases include reflection, rotation, shear, fractional placement, source
+masks and singular matrices. Alpha pixels are checked against independently
+calculated straight/white-premultiplied/black-premultiplied equations.
+PDFium tests compare affine image layers, origin/clipping, and shared diagonal,
+polygon, arc and complex-region frame coverage. Frame tests verify actual
+pixel-run paths (no generic strokes or image fallback; 8x8 pattern resources
+remain allowed). Two overlapping partial-alpha layers allow a maximum two
+8-bit channel levels of PDFium rounding difference; opaque cases remain exact.
+Local FFmpeg 7.1.1 independently encoded authored RGB24/ARGB32/RGB555BE Animation
+packets, all decoded to the input RGB pixels. This local codec check is not a
+native-CI dependency or a historical decoder oracle.
 Font-resource fixtures construct original NFNT/FONT/FOND maps and AppleSingle
 entries. Cases cover exact/ambiguous associations, source aliases, optional
 directory bounds, truncation, duplicate pairs, width precedence/disablement,
@@ -192,6 +206,16 @@ jobs is not evidence that Windows tests passed.
 * QuickDrawViewer `QuickTime.swift` (read-only format comparison): compressed
   picture fields and source-region transition layout; no implementation copied.
   Matrix fields follow QuickTime 16.16 affine and 2.30 projective conventions.
+* [Apple, video sample data](https://developer.apple.com/documentation/quicktime-file-format/video_sample_data):
+  raw scanline alignment and packed RGB555/RGB24/ARGB32 channel order.
+* [Apple, graphics modes](https://developer.apple.com/documentation/quicktime-file-format/graphics_modes):
+  straight and white/black premultiplied alpha definitions.
+* [MultimediaWiki, Apple QuickTime RLE](https://wiki.multimedia.cx/index.php/Apple_QuickTime_RLE):
+  Animation header, row runs, skips and direct-color formats; FFmpeg `qtrleenc.c`
+  corroborates direct-color keyframe encoding. No codec implementation copied.
+* [Apple, compressed movie matte atom](https://developer.apple.com/documentation/quicktime-file-format/compressed_matte_atom):
+  insufficient to establish PICT-specific separate-matte semantics; support
+  remains explicitly blocked on that narrower evidence, not on a general oracle.
 * [Apple, SetOrigin semantics](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-40.html)
 * [Apple, FrameRoundRect](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-103.html)
 * [Apple, FrameArc](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-115.html)
@@ -242,8 +266,8 @@ contract, not a requirement to implement every imaginable historical extension.
 | Remaining family behavior | Documented synthetic-style properties and richer metadata inspection can be implemented if added to the supported contract | Negative version-0/1 values need a resolved representation contract or identified historical samples; current exact intrinsic bindings do not synthesize styles |
 | Outline fonts and encodings | Add explicitly bound sfnt outlines and a documented shaping/encoding contract using established libraries | Source encoding/script and matching licensed font files must be known, not guessed from byte strings or names |
 | Justification | Implement documented simple-script spacing once the input encoding/script contract is explicit | Script identity and representative recorded lineJustify/ChExtra cases; a raw NFNT does not identify a Script Manager environment |
-| Embedded images | Add documented QuickTime raw/RLE still codecs, affine placement and defined alpha/matte compositing with bounded fixtures | Historical codec/color-management equivalence needs known originals and a decoder environment |
-| Preserved vector coverage | Add remaining pen/shape frames using QuickDraw coverage rather than generic SVG strokes; retain explicit full-composite fallback for destination modes | Editable-vector versus screen-pixel presentation remains a fidelity choice, not something to conceal |
+| Embedded images | Raw/direct Animation stills, affine placement and explicit alpha modes implemented; other documented codecs and OpColor modes remain implementable | Separate PICT matte byte layout, coordinate mapping and mode interaction need a verified specification or provenance-backed samples; movie matte atoms are not sufficient evidence |
+| Preserved vector coverage | Shared diagonal/polygon/arc/complex-region frame paths implemented; destination-dependent operations still require full-composite fallback | Editable continuous geometry versus portable pixel-run presentation remains a fidelity choice; premultiplied source-over needs a representable precision contract before preserved-vector support |
 | Additional containers | Explicit native resource-fork access can build on current extraction; AppleSingle v2 is implemented | Filesystem behavior and deployment policy must be tested per platform |
 | Classic fidelity | Improve specification-backed coverage and differential backend checks now | Pixel equivalence requires an identified OS/QuickDraw/device/font setup, lawful reference outputs and a representative corpus |
 

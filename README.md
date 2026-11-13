@@ -14,8 +14,11 @@ documented source transfer modes under an explicit portable policy.
 Resource forks, MacBinary, AppleDouble and AppleSingle support explicit picture
 and font-resource selection. Explicit Roman FOND bindings provide exact bitmap
 associations, family fractional widths and opt-in within-run pair kerning.
-Embedded JPEG/PNG still images support bounded decoding and restricted transforms.
-Other QuickTime codecs/transforms, outline/multibyte text and several
+Embedded JPEG/PNG and direct-color raw/Animation still images support bounded
+decoding. Nonsingular affine placement and recorded straight/premultiplied alpha
+use an explicit portable policy. Separate matte payloads remain unsupported.
+Diagonal pens and polygon/arc/complex-region frames can export shared pixel-run paths.
+Other QuickTime codecs/projective transforms, outline/multibyte text and several
 vector modes remain unsupported. Unsupported drawing fails instead of disappearing.
 Classic-Mac pixel fidelity has not been established.
 The separate `miyako/quickdraw` 4D component is not implemented here.

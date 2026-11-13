@@ -117,6 +117,12 @@ FOND family selection requires a declared Roman script; pair kerning is an
 explicit approximate-policy opt-in, not inferred from font availability.
 A wrapper must
 surface unsupported-font/encoding errors rather than retry with guessed fonts.
+Further additive capabilities advertise direct-color raw/Animation stills,
+nonsingular affine placement and recorded alpha modes. Extended affine/alpha
+requires approximate fidelity; premultiplied-alpha vector output requires the
+explicit complete-raster policy. Separate matte payloads remain unsupported.
+Diagonal/polygon/arc/complex-region frames now preserve shared pixel-run paths.
+Protocol 1, archive layout and existing raw-font/opaque-image behavior are unchanged.
 
 Archives use sorted members, a fixed 1980 timestamp, explicit Unix permissions,
 canonical JSON and stored (uncompressed) members. Identical binary, source/docs,
