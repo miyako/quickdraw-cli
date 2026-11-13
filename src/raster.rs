@@ -478,9 +478,12 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                     if bitmap.raw_copy {
                         image_policy(bitmap, &state, options, &mut diagnostics, op.offset)?;
                     } else {
-                        state.validate(bitmap.mode, false)?;
+                        copybits_policy(bitmap, options, &mut diagnostics, op.offset)?;
+                        state.validate(bitmap.transfer_mode(), false)?;
                     }
-                    if matches!(bitmap.pixels, Pixels::Rgb(_)) && (1..=7).contains(&bitmap.mode) {
+                    if matches!(bitmap.pixels, Pixels::Rgb(_))
+                        && (1..=7).contains(&bitmap.transfer_mode())
+                    {
                         require_approximate(
                             options,
                             &mut diagnostics,
@@ -1292,6 +1295,26 @@ fn line(
     apply_mask(canvas, &mask, state, budget)
 }
 
+pub(crate) fn copybits_policy(
+    bitmap: &Bitmap,
+    options: &RenderOptions,
+    diagnostics: &mut Vec<Diagnostic>,
+    offset: usize,
+) -> Result<()> {
+    if bitmap.transfer_mode() != bitmap.mode {
+        require_approximate(
+            options,
+            diagnostics,
+            offset,
+            "CopyBits dither hint is inactive only in the no-reduction portable RGB8 profile",
+        )?;
+        diagnostics.push(Diagnostic::new("copybits_dither_inactive",
+            "CopyBits bit 64 accepted: source precision fits RGB8 and neither dimension shrinks. No palette quantization, error diffusion or averaging is performed.",
+            Some(offset)));
+    }
+    Ok(())
+}
+
 pub(crate) fn image_policy(
     bitmap: &Bitmap,
     state: &State<'_>,
@@ -1359,7 +1382,7 @@ fn blit(
                         canvas.composite(x, y, color, alpha, bitmap.mode, state);
                     }
                 } else {
-                    canvas.apply(x, y, color, bitmap.mode, state);
+                    canvas.apply(x, y, color, bitmap.transfer_mode(), state);
                 }
             }
         }

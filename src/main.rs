@@ -450,6 +450,7 @@ fn capabilities() -> Value {
             "rectangular_and_transition_regions", "ordered_boolean_compositing",
             "monochrome_bitmaps", "indexed_1_2_4_8_bit_pixmaps",
             "rgb555_and_rgb32_pixmaps", "packbits_byte_and_word_runs",
+            "pixmap_address_versions_0_4",
             "source_destination_bitmap_rectangles", "bitmap_region_masks",
             "origin_changes", "pixel_patterns", "explicit_highlight_color",
             "arithmetic_transfer_modes_32_to_39", "transparent_pattern_mode_44",
@@ -470,7 +471,15 @@ fn capabilities() -> Value {
             "vector_bitmap_copy_notCopy_transparent", "vector_tiled_patterns",
             "vector_pixel_run_diagonal_polygon_arc_complex_region_frames"
         ],
-        "approximate_only": ["ovals", "rounded_rectangles", "arcs", "polygons", "diagonal_lines", "complex_region_outlines", "printer_comments", "color_bitmap_boolean_modes", "text_scaling_fractional_layout_extended_modes", "quicktime_extended_affine_and_alpha"],
+        "approximate_only": ["ovals", "rounded_rectangles", "arcs", "polygons", "diagonal_lines", "complex_region_outlines", "printer_comments", "color_bitmap_boolean_modes", "copybits_inactive_dither_hint_no_reduction", "text_scaling_fractional_layout_extended_modes", "quicktime_extended_affine_and_alpha"],
+        "copybits_dither_hint": {
+            "recorded_modes": [64,65,66,67,68,69,70,71],
+            "policy": "approximate only; base source mode with inactive bit 64, never a dithering algorithm",
+            "source": "monochrome, RGB555/RGB32, or explicit indexed tables whose every RGB16 component is exactly replicated RGB8",
+            "placement": "neither destination dimension may shrink relative to its source rectangle",
+            "diagnostic": "copybits_dither_inactive",
+            "quicktime_modes_unchanged": true
+        },
         "unsupported": [
             "implicit_system_fonts", "classic_outline_mapping", "cff_variable_color_aat_fonts", "multibyte_text", "color_nfnt",
             "script_specific_line_justification", "nonpositive_or_disabled_text_scaling",

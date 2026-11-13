@@ -703,15 +703,21 @@ pub fn export_vector(
                             &mut diagnostics,
                             op.offset,
                         )?;
+                    } else {
+                        crate::raster::copybits_policy(
+                            bitmap,
+                            options,
+                            &mut diagnostics,
+                            op.offset,
+                        )?;
                     }
-                    if !(matches!(bitmap.mode, 0 | 4 | 36)
-                        || (bitmap.raw_copy && bitmap.mode == 256))
-                    {
+                    let mode = bitmap.transfer_mode();
+                    if !(matches!(mode, 0 | 4 | 36) || (bitmap.raw_copy && bitmap.mode == 256)) {
                         return Err(unsupported(
                             "preserved bitmap requires copy/transparent or straight alpha; premultiplied alpha and image OpColor blending require explicit whole-picture raster",
                         ));
                     }
-                    if bitmap.mode == 4 && matches!(bitmap.pixels, Pixels::Rgb(_)) {
+                    if mode == 4 && matches!(bitmap.pixels, Pixels::Rgb(_)) {
                         if options.fidelity == Fidelity::Strict {
                             return Err(unsupported(
                                 "color bitmap notSrcCopy requires --fidelity approximate",
@@ -1013,7 +1019,7 @@ fn emit_bitmap(
                     source
                 } else {
                     copy_color(
-                        if bitmap.mode == 4 {
+                        if bitmap.transfer_mode() == 4 {
                             source.map(|v| !v)
                         } else {
                             source

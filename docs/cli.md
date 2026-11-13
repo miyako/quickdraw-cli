@@ -126,6 +126,28 @@ conversion of a historical display profile.
 There is no transparency option: destination-dependent Boolean drawing needs a
 defined destination.
 
+#### Core CopyBits and PixMaps
+
+Classic indexed depths 1/2/4/8 and direct RGB555/RGB32 use the layouts and
+packing inventory in [support.md](support.md#core-pixmapcopybits-operand-inventory).
+`pmVersion` 0 and the address-only flag 4 are accepted; serialized addresses are
+never followed. Unknown version/color-table flags and nonzero reserved fields
+fail instead of being discarded. PICT `packSize` must be zero.
+
+Ordinary CopyBits modes 64-71 are accepted **only** with
+`--fidelity approximate`, as base source modes 0-7 with an inactive dither hint.
+Neither destination dimension may be smaller than its source rectangle.
+Source precision must fit the existing RGB8 profile: monochrome, RGB555/RGB32,
+or an explicit indexed palette whose every RGB16 component is exactly an
+8-bit value repeated in both bytes. All other flagged reduction cases fail.
+This is not an implementation of dithering, error diffusion, palette search
+or shrink averaging. Successful use emits `copybits_dither_inactive` with the
+operation offset; strict mode rejects it. Existing unflagged modes, tinting,
+nearest-neighbor placement, clip/origin/masks and boolean equations are unchanged.
+Modes 64/68 can preserve image layers; the other accepted flag combinations
+require full-composite vector raster policy. Other flag combinations still fail.
+These rules do **not** normalize QuickTime graphics modes or text mask modes.
+
 Source paths (including the font map and fonts), hard-link aliases, symlink outputs, directories and other
 nonregular outputs are protected even with `--overwrite`. Output is prepared in
 a temporary file in its destination directory, flushed, synced, then atomically

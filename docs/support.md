@@ -25,7 +25,7 @@ emits an operation-offset warning for every accepted approximation.
 | Polygons (`70`-`74`) | Approximate even-odd pixel-center fill; integer stroked closed outlines |
 | Same polygon / same region (`78`-`7C`, `88`-`8C`) | Explicitly unsupported (also marked unimplemented in Apple's opcode appendix) |
 | Mono BitsRect/BitsRgn/PackBitsRect/PackBitsRgn (`90`, `91`, `98`, `99`) | Supported; source/destination rectangles, region masks, foreground/background mapping |
-| Indexed PixMaps in v2 | 1/2/4/8-bit; color-table index or sequential device-table entries; absent/duplicate indices rejected |
+| Indexed PixMaps in v2 | 1/2/4/8-bit; address versions 0/4; color-table index or sequential device-table entries; absent/duplicate indices and unknown flags rejected |
 | DirectBitsRect/DirectBitsRgn (`9A`, `9B`) | RGB555 and RGB32; RGB only, high pad byte is not alpha |
 | Packing | Byte PackBits; word PackBits for RGB555; RGB32 unpacked, pad-dropped, planar component packing; 3/4 component layouts |
 | CopyBits modes 0-7 | Mono strict; non-copy color PixMaps require approximate mode |
@@ -44,7 +44,7 @@ emits an operation-offset warning for every accepted approximation.
 | OpColor / arithmetic modes (`1F`, modes 32-39) | Component blend, pin/wrap add/subtract, transparency, max/min; blend and pin modes require explicit OpColor |
 | Highlight (`1C`-`1E`, modes 50/52/58/60) | Exchanges background/highlight colors, leaves other destination colors intact; one-shot HiliteMode; explicit HiliteColor or CLI highlight required |
 | Transparent pattern mode 44 | Whole-pixel background keying |
-| Dithering / other extended modes | Unsupported; never silently mapped to copy |
+| CopyBits dither hint 64-71 | Approximate-only inactive hint when no source precision or spatial reduction occurs; underlying source mode preserved, explicit diagnostic; actual dithering/other flag combinations unsupported |
 | QuickTime compressed (`8200`) | JPEG/PNG, single-page TIFF/single-image GIF, direct and explicitly paletted 1/2/4/8-bit raw/Animation, RGB555 RPZA and explicitly paletted SMC self-contained stills; exact explicit boundaries in CLI contract |
 | QuickTime affine/alpha | Nonsingular affine rotation/reflection/shear/fractional placement; straight and premultiplied white/black alpha, explicit approximate policy; source mask, clip and origin preserved |
 | QuickTime grayscale/description/OpColor | Explicit white-zero depths 34/36/40; retained neutral fiel/pasp/clap and optional zero terminator; modes 32/260 with recorded OpColor and approximate policy |
@@ -94,6 +94,77 @@ same-poly/region entries, plus restricted operand/layout/mode combinations.
 Genuine vector support is a **second** gate: destination-dependent drawing and
 premultiplied image alpha require explicit whole-picture raster fallback, never
 an isolated transparent overlay.
+
+### Core PixMap/CopyBits operand inventory
+
+No additional classic pixel depth or row-packing algorithm was missing from the
+baseline. The bounded extension accepts the documented address-only version 4,
+adds only an explicitly inactive dither-hint profile, and stops silently ignoring
+unknown flags/reserved fields. It does not invent a 24-bit classic PixMap layout
+from QuickTime's separate 24-bit format.
+
+| Operand | Executable coverage | Explicit rejection / boundary |
+| --- | --- | --- |
+| BitMap | 1-bit MSB-first; foreground/background expansion; v1/v2 | PixMap records in v1; invalid odd/zero/too-small rowBytes |
+| Indexed PixMap | MSB-first 1/2/4/8 bits, pixelType 0, one component of pixelSize bits | Other depths/types/component layouts; absent used indices; no implicit device palette |
+| Direct PixMap | pixelType 16, RGB555 with 3x5 bits; RGB32 with 3/4x8 bits, high byte padding | 24-bit pixelSize, alpha interpretation of padding, unsupported component tuples/planar memory |
+| Indexed/mono packing | Unpacked short rows; byte PackBits for packed opcodes; indexed packType 1 explicitly unpacked | Indexed packType >1; BitsRect/BitsRgn with rowBytes >=8 (both PICT versions, Appendix A footnotes 5/8) |
+| Direct packing | 16-bit types 1/3; 32-bit types 1/2/4; type 0 defaults to 3/4; rows <8 bytes uncompressed even when another legal packing type is recorded | Other depth/packing pairs and unknown types; bad stride/component count |
+| PackBits framing | Signed controls, -128 no-op, byte/word units; exact row output; count is u16 iff original rowBytes >250, otherwise u8 | Row overrun/underrun, truncated controls/data; bounded input, decoded bytes and work |
+| Color tables | ctFlags 0: ColorSpec.value is index; 0x8000: supplied table order; RGB16 high bytes under existing RGB8 profile | Other ctFlags; duplicate/out-of-range indices; no active GDevice table, color-search callback or cached inverse table |
+| Other fields | pmVersion 0/4, zero planeBytes/pmReserved/packSize; pmTable/baseAddr addresses never dereferenced, cache seed is not a missing-palette authorization | Private version bits, nonzero reserved/planar fields; nonzero PICT packSize malformed; DirectBits sentinel still required |
+| Source transfer | 0-7; existing arithmetic 32-39 and highlight 50/52/58/60 with explicit required state | Other base modes; absent OpColor/highlight; pattern-only modes not accepted as CopyBits sources |
+| Dither flag | 64-71 reduce to their corresponding 0-7 source modes only under approximate policy and the no-reduction RGB8 conditions below | Shrink in either axis, higher-precision palettes, other combined flags; no actual dithering or device palette quantization |
+
+The inactive-hint source profile permits monochrome, RGB555/RGB32 and indexed
+tables whose **every supplied** RGB16 component equals replicated RGB8.
+Source/destination rectangles must not shrink either dimension. It emits
+`copybits_dither_inactive` rather than silently discarding bit 64, leaves the
+recorded mode intact internally, and shares effective modes across raster and
+vector. Only 64/68 are source-only preserved-vector cases; destination-dependent
+variants need the existing complete-composite raster policy. Ordinary mode 36
+continues to key against background, unlike QuickTime's separate OpColor key.
+Unflagged shrinking retains the existing declared nearest-neighbor profile;
+historical direct-device shrink averaging is **not** newly claimed.
+
+Sources: Apple's *Inside Macintosh: Imaging With QuickDraw*, HTML revision
+7 July 1996: [PixMap](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-202.html),
+[ColorSpec](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-205.html),
+[ColorTable](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-206.html),
+[Appendix A packing](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-461.html),
+[CopyBits](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-166.html), and
+[dithering/device behavior](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-199.html).
+The flag, address and packing definitions are direct documentary evidence.
+The no-reduction acceptance rule is an explicit conservative **portable policy**,
+not a recorded historical rendering result or recovered dithering algorithm.
+
+`scripts/generate_pixmap_fixtures.py` writes 13 original fixtures in
+`tests/fixtures/pixmaps.json`; Pillow 11.1.0/libtiff 4.6.0 independently encode
+and decode each byte-PackBits row. Authored PICT framing/expected colors cover
+all indexed depths, reordered/sequential tables, padding, prefix threshold
+250/252 and direct 3/4-component packing including short-row override.
+RGB555 word-unit PackBits remains separately source-authored, not claimed as
+libtiff-encoded. Tests cover truncations/budgets, unknown flags, PixPat reuse,
+strict rejection, all accepted flagged source modes, scaling/origin/clip and
+overlap. Pillow checks decoded PNG/SVG layer pixels; PDFium independently checks
+masked/clipped PDF rendering and complete-composite fallback. None is a
+classic-Mac fidelity oracle.
+
+### Remaining gaps after the core bitmap milestone
+
+| Category | Remaining gap | What permits further work |
+| --- | --- | --- |
+| Core standard operations | Nonzero lineJustify, PreserveGlyph/other excluded text state; Apple's undefined same-poly/region slots; other HeaderOp source mappings | Affirmative playback/mapping evidence for the particular operand; do not infer behavior from reserved opcode lengths |
+| Core device-dependent CopyBits | Actual dithering, indexed destination palette search, shrink averaging, higher-precision flagged palettes and other mode combinations | Explicit destination precision/palette/filter policy or an identified historical device target; current defaults are unchanged |
+| Optional extensions | Separate PICT mattes, QuickTime 8201/projective/color-managed images and other codecs; broader printer/CFF/font/script profiles | PICT-specific matte/layout evidence, or explicitly selected supported contracts; non-Roman needs encoding/language/direction; not automatic blockers for the current subset |
+| Unavailable fidelity evidence | Classic edge rules, global/device state, font metrics and producer-specific equivalence | Lawful source/output pairs with OS/QuickDraw/device/font identities and representative real files |
+
+No further missing documented **device-independent PixMap pixel/packing family**
+was identified. More core regression/producer-bug work can proceed under the
+existing contract; no further rendering feature is asserted implementable from
+this inventory without the specific evidence or policy above. The known
+lineJustify/matte investigations were not reopened. Component acceptance,
+signed distribution and release publication remain separate, deferred gates.
 
 ### Common still-image variant inventory
 

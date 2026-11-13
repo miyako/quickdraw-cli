@@ -384,6 +384,14 @@ impl Affine {
     }
 }
 impl Bitmap {
+    pub fn transfer_mode(&self) -> u16 {
+        // The parser admits bit 64 only without source precision or spatial reduction.
+        if !self.raw_copy && (64..=71).contains(&self.mode) {
+            self.mode - 64
+        } else {
+            self.mode
+        }
+    }
     pub fn sample(&self, x: i32, y: i32) -> Option<([u8; 3], u8)> {
         let dest = self.destination;
         if !dest.contains(x, y) || self.mask.as_ref().is_some_and(|m| !m.contains(x, y)) {

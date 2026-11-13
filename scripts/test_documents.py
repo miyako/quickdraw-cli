@@ -294,6 +294,48 @@ class Documents(unittest.TestCase):
                 self.assertEqual(result.returncode,5,result.stderr)
                 self.compare_pdf_with_raster(blend_ops,frame=(0,0,12,20),extra=("--fidelity","approximate"),policy="raster")
 
+    def test_core_pixmaps_match_independent_rows_and_masked_vector_layers(self):
+        import base64
+        cases=json.loads((Path(__file__).resolve().parent.parent/"tests/fixtures/pixmaps.json").read_text())["cases"]
+        for case in cases:
+            with self.subTest(name=case["name"]):
+                width,height=case["width"],case["height"]
+                packet=bytes.fromhex(case["packet"])
+                result,target=self.convert("png",operations=[(case["opcode"],packet)],frame=(0,0,height,width))
+                self.assertEqual(result.returncode,0,result.stderr)
+                with Image.open(target) as image:
+                    self.assertEqual(image.convert("RGB").tobytes(),bytes.fromhex(case["rgb"]))
+                # The fixture ends in source/destination/mode followed by rows.
+                table_end=50 if case["opcode"]==0x9a else 54+8*(struct.unpack_from(">H",packet,52)[0]+1)
+                modified=bytearray(packet)
+                modified[table_end+8:table_end+16]=words(2,3,2+height*2,3+width*2)
+                modified[table_end+16:table_end+18]=words(64)
+                masked=modified[:table_end+18]+words(10,2,4,2+height*2,3+width*2)+modified[table_end+18:]
+                frame=(0,0,8,8+width*2)
+                ops=[(0x31,words(*frame)),(0x0c,words(1,1)),(1,words(10,0,0,6,4+width*2)),
+                     (case["opcode"]+1,masked)]
+                extra=("--fidelity","approximate")
+                self.compare_pdf_with_raster(ops,frame=frame,extra=extra)
+                result,target=self.convert("svg",operations=ops,frame=frame,extra=extra)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertIn("copybits_dither_inactive",[d["code"] for d in json.loads(result.stdout)["diagnostics"]])
+                node=ET.parse(target).find(".//{http://www.w3.org/2000/svg}image")
+                href=node.get("href") or node.get("{http://www.w3.org/1999/xlink}href")
+                with Image.open(io.BytesIO(base64.b64decode(href.split(",")[1]))) as embedded:
+                    expected=Image.frombytes("RGB",(width,height),bytes.fromhex(case["rgb"])).convert("RGBA").resize((width*2,height*2),Image.Resampling.NEAREST)
+                    expected.paste((0,0,0,0),(0,0,1,height*2))
+                    self.assertEqual(embedded.convert("RGBA").tobytes(),expected.tobytes())
+                not_copy=bytearray(masked)
+                not_copy[table_end+16:table_end+18]=words(68)
+                self.compare_pdf_with_raster(ops[:-1]+[(case["opcode"]+1,not_copy)],frame=frame,extra=extra)
+                if width<=2:
+                    xor=bytearray(masked)
+                    xor[table_end+16:table_end+18]=words(66)
+                    overlap=ops[:-1]+[(case["opcode"]+1,xor),(case["opcode"]+1,xor)]
+                    result,_=self.convert("pdf",operations=overlap,frame=frame,extra=extra)
+                    self.assertEqual(result.returncode,5,result.stderr)
+                    self.compare_pdf_with_raster(overlap,frame=frame,extra=extra,policy="raster")
+
     def test_quicktime_opcolor_key_preserves_masked_affine_layers(self):
         source = Image.new("RGB", (4, 2))
         source.putdata([(18,52,86),(19,52,86),(18,52,86),(18,52,87)] * 2)

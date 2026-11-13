@@ -612,6 +612,15 @@ fn bitmap(r: &mut Reader<'_>, op: u16, version: u8, budget: &mut Budget<'_>) -> 
         return Err(malformed("bitmap source rectangle outside bounds or empty"));
     }
     let mode = r.u16()?;
+    if (64..=71).contains(&mode)
+        && (!layout.exact_rgb8
+            || destination.width() < source.width()
+            || destination.height() < source.height())
+    {
+        return Err(unsupported(
+            "CopyBits dithering with color-precision or spatial reduction requires an explicit device/filter policy",
+        ));
+    }
     let mask = if op & 1 != 0 {
         Some(region(r, budget)?)
     } else {
@@ -1000,6 +1009,7 @@ struct MapLayout {
     depth: u16,
     components: u16,
     palette: [Option<[u8; 3]>; 256],
+    exact_rgb8: bool,
 }
 
 fn map_layout(
@@ -1022,13 +1032,14 @@ fn map_layout(
     budget.limits.pixels(width, height)?;
     let (mut pack_type, mut depth, mut components) = (0, 1u16, 1u16);
     let mut palette = [None; 256];
+    let mut exact_rgb8 = true;
     if pixmap {
         if version == 1 {
             return Err(unsupported("indexed PixMaps in PICT v1"));
         }
         let pm_version = r.u16()?;
         pack_type = r.u16()?;
-        r.u32()?;
+        let pack_size = r.u32()?;
         r.u32()?;
         r.u32()?;
         let pixel_type = r.u16()?;
@@ -1037,9 +1048,14 @@ fn map_layout(
         let component_size = r.u16()?;
         let plane_bytes = r.u32()?;
         r.u32()?;
-        r.u32()?;
-        if pm_version != 0 || plane_bytes != 0 {
-            return Err(unsupported("PixMap version or planar layout"));
+        let reserved = r.u32()?;
+        if !matches!(pm_version, 0 | 4) || plane_bytes != 0 || reserved != 0 {
+            return Err(unsupported(
+                "PixMap private version flags, planar layout or extension",
+            ));
+        }
+        if pack_size != 0 {
+            return Err(malformed("PICT PixMap packSize must be zero"));
         }
         if direct {
             if pixel_type != 16
@@ -1063,13 +1079,18 @@ fn map_layout(
             }
             r.u32()?;
             let flags = r.u16()?;
+            if !matches!(flags, 0 | 0x8000) {
+                return Err(unsupported("unknown PixMap color-table flags"));
+            }
             let entries = r.u16()? as usize + 1;
             if entries > 256 {
                 return Err(malformed("color table contains more than 256 entries"));
             }
             for i in 0..entries {
                 let value = r.u16()? as usize;
-                let color = r.color()?;
+                let components = [r.u16()?, r.u16()?, r.u16()?];
+                exact_rgb8 &= components.iter().all(|v| v >> 8 == v & 255);
+                let color = components.map(|v| (v >> 8) as u8);
                 let index = if flags & 0x8000 != 0 { i } else { value };
                 if index >= (1usize << depth) || palette[index].is_some() {
                     return Err(malformed("invalid or duplicate color table index"));
@@ -1092,6 +1113,7 @@ fn map_layout(
         depth,
         components,
         palette,
+        exact_rgb8,
     })
 }
 
@@ -1110,6 +1132,7 @@ fn map_pixels(
         depth,
         components,
         palette,
+        exact_rgb8: _,
     } = layout;
     let (width, height) = (bounds.width(), bounds.height());
     let pixels = budget.limits.pixels(width, height)?;

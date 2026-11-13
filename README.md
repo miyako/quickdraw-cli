@@ -11,6 +11,9 @@ Origin changes, rounded rectangles, arcs, pixel patterns, arithmetic/highlight
 modes and one-bit NFNT text are implemented with explicit limitations. Text
 supports optional width/height tables, ratio scaling, fractional spacing and
 documented source transfer modes under an explicit portable policy.
+Classic PixMap depths/packing include address versions 0/4. CopyBits' dither
+hint is accepted only with approximate policy and no size/precision reduction;
+actual dithering and implicit device palettes remain unsupported.
 Resource forks, MacBinary, AppleDouble and AppleSingle support explicit picture
 and font-resource selection. Explicit Roman FOND bindings provide exact bitmap
 associations, family fractional widths and opt-in within-run pair kerning.

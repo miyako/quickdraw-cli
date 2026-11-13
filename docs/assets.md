@@ -16,6 +16,12 @@ These are standalone CLI assets, not the component itself.
 
 ## Build and package
 
+The PixMap/CopyBits extension keeps protocol 1, font-map schema 1 and asset schema
+1. Capabilities add address versions 0/4 and the narrowly bounded
+`copybits_dither_hint` profile; no arguments/defaults change.
+Consumers must retain the `copybits_dither_inactive` warning. Unknown PixMap
+flags/reserved fields and invalid nonzero PICT packSize now fail explicitly.
+
 On each matching native host, from a **clean committed checkout**:
 
 ```sh

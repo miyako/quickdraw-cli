@@ -153,6 +153,7 @@ fn indexed_pixel_pattern_repeats_after_origin_changes() {
     let mut tile = word(1);
     tile.extend([0; 8]);
     tile.extend(pixmap_header(2, [0, 0, 2, 2], 1, 0, false, 1));
+    tile[20..22].copy_from_slice(&word(4));
     tile.extend([0; 6]);
     tile.extend(word(1));
     tile.extend(word(0));
