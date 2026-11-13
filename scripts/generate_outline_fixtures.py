@@ -8,6 +8,11 @@ from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.ttLib import TTCollection
 from fontTools.feaLib.builder import addOpenTypeFeaturesFromString
+from fontTools.pens.t2CharStringPen import T2CharStringPen
+from fontTools.misc.psCharStrings import T2CharString
+from fontTools.cffLib import SubrsIndex
+from fontTools.pens.recordingPen import RecordingPen
+import json
 
 
 def glyph(draw):
@@ -70,6 +75,40 @@ def font(wide=False):
     return builder.font
 
 
+def cff_font():
+    base=font()
+    del base["glyf"],base["loca"]
+    base.sfntVersion="OTTO"
+    base["maxp"].tableVersion=0x5000
+    builder=FontBuilder(font=base,isTTF=False)
+    builder.setupNameTable({"familyName":"Quickdraw Portable CFF","styleName":"Regular",
+                           "uniqueFontIdentifier":"QuickdrawPortableCFF",
+                           "fullName":"Quickdraw Portable CFF","psName":"QuickdrawPortableCFF",
+                           "licenseDescription":"Original geometric fixture; MIT license, see repository LICENSE."})
+    chars={}
+    for name in base.getGlyphOrder():
+        pen=T2CharStringPen(700,None)
+        if name=="O":
+            ring(pen)
+        elif name=="C":
+            pen.moveTo((0,0));pen.lineTo((600,0))
+            pen.curveTo((600,900),(0,900),(0,0));pen.closePath()
+        elif name!="space":
+            rectangle(pen,0,0,600,700)
+        chars[name]=pen.getCharString(private=None,globalSubrs=None)
+    builder.setupCFF("QuickdrawPortableCFF",{"FullName":"Quickdraw Portable CFF","FamilyName":"Quickdraw Portable CFF","Weight":"Regular"},
+                     chars,{"defaultWidthX":700,"nominalWidthX":0})
+    top=base["CFF "].cff.topDictIndex[0]
+    local=SubrsIndex()
+    local.append(T2CharString(program=[600,0,0,700,-600,0,"rlineto","return"],private=top.Private,globalSubrs=top.GlobalSubrs))
+    top.Private.Subrs=local
+    top.GlobalSubrs.append(T2CharString(program=[-107,"callsubr","return"],private=top.Private,globalSubrs=top.GlobalSubrs))
+    # Hints are recorded but not applied by the portable unhinted profile.
+    top.CharStrings["A"]=T2CharString(program=[0,20,"hstemhm",0,20,"hintmask",b"\xc0",0,0,"rmoveto",-107,"callgsubr","endchar"],
+                                        private=top.Private,globalSubrs=top.GlobalSubrs)
+    return base
+
+
 if __name__ == "__main__":
     root = Path("tests/fixtures")
     regular, wide = font(), font(True)
@@ -77,3 +116,17 @@ if __name__ == "__main__":
     collection = TTCollection()
     collection.fonts = [regular, wide]
     collection.save(root / "portable-outline.ttc")
+    cff=cff_font()
+    cff.save(root/"portable-outline-cff.otf")
+    collection.fonts=[regular,cff]
+    collection.save(root/"portable-outline-mixed.ttc")
+    from fontTools.ttLib import TTFont
+    loaded=TTFont(root/"portable-outline-cff.otf")
+    glyphset=loaded.getGlyphSet()
+    paths={}
+    for name in loaded.getGlyphOrder():
+        pen=RecordingPen();glyphset[name].draw(pen)
+        paths[name]=pen.value
+    (root/"portable-outline-cff.json").write_text(json.dumps({
+        "provenance":"Original geometric fonts generated and independently decompiled by fontTools 4.68.0; not historical glyphs",
+        "paths":paths},indent=2)+"\n")

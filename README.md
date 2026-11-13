@@ -22,7 +22,8 @@ Raw/Animation also support declared white-zero grayscale depths. Neutral image
 description hints are validated and retained; OpColor blending requires an
 explicit weight and whole-picture vector fallback.
 Diagonal pens and polygon/arc/complex-region frames can export shared pixel-run paths.
-Explicit portable MacRoman text can use caller-supplied static TrueType sfnt/TTC
+Explicit portable MacRoman text can use caller-supplied static TrueType or supported
+name-keyed CFF1 sfnt/TTC
 faces with deterministic shaping and genuine SVG/PDF glyph paths. Classic
 outline mapping, multibyte text, other QuickTime codecs/projective transforms and several
 vector modes remain unsupported. Unsupported drawing fails instead of disappearing.

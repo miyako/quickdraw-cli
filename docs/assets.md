@@ -136,7 +136,11 @@ suffix bytes/offset; consumers must preserve the new diagnostic and require
 whole-picture vector fallback for image blending. Existing outline profiles,
 versioned envelopes and asset schema remain unchanged.
 Schema-1 font maps now optionally select `outline:{face_index,encoding:"macroman",
-kerning:false}` for exact static TrueType sfnt/TTC input. `portable_outline_v1`
+kerning:false}` for exact static TrueType or supported name-keyed CFF1 sfnt/TTC
+input. The original `outline_fonts.outlines` capability stays unchanged;
+`additional_outlines` advertises the added CFF1 profile without changing the
+existing field's type or value. `nonzero_linejustify:false` makes its evidence
+boundary explicit. `portable_outline_v1`
 is separately reported and requires approximate fidelity; bitmap bindings and
 protocol 1 remain compatible. Packages include the locked portable shaper/parser
 and their redistribution notices, not platform font dependencies or user fonts.

@@ -398,7 +398,7 @@ fn capabilities() -> Value {
         "font_map_schema": 1,
         "text_profile": "portable_nfnt_v1",
         "outline_profile": "portable_outline_v1",
-        "outline_fonts": {"container":["sfnt","ttc"],"outlines":"static_truetype_glyf","encoding":"macroman_post_8_5","face_index":"explicit","shaping":"rustybuzz_latin_ltr_und","kerning":"explicit_opt_in","ligatures":"liga_clig_dlig_disabled","classic_fidelity":false},
+        "outline_fonts": {"container":["sfnt","ttc"],"outlines":"static_truetype_glyf","additional_outlines":["static_cff1_name_keyed_type2"],"encoding":"macroman_post_8_5","face_index":"explicit","shaping":"rustybuzz_latin_ltr_und","kerning":"explicit_opt_in","ligatures":"liga_clig_dlig_disabled","classic_fidelity":false,"nonzero_linejustify":false},
         "text_modes": {"base": [0,1,2,3,4,5,6,7,32,33,34,35,36,37,38,39], "mask_flag":64},
         "containers": ["auto", "raw", "file", "resource-fork", "macbinary", "appledouble", "applesingle"],
         "font_resource_types": ["NFNT", "FONT", "FOND"],

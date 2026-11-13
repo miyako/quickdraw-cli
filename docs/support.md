@@ -55,7 +55,7 @@ emits an operation-offset warning for every accepted approximation.
 | SVG / PDF | Explicit whole-picture raster or supported genuine-path policy; PDF 1.4 single page |
 | Native vector subset | Tiled patterns, copied/straight-alpha image layers, shapes/regions and NFNT runs; diagonal/polygon/arc/complex-region frames use shared pixel-run coverage |
 | Remaining embedded-image gaps | Separate matte payloads, projective matrices, other transfer modes, semantic extensions, temporal/skipped-pixel Animation, implicit color palettes, planar raw, CMYK/16-bit-channel images; premultiplied alpha and OpColor blending need whole-picture raster |
-| Portable outline text | Explicit static TrueType sfnt/TTC face, declared post-8.5 MacRoman, Rustybuzz Latin/LTR shaping, fixed optional features, opt-in kerning, genuine glyph paths; approximate-only |
+| Portable outline text | Explicit static TrueType or supported name-keyed CFF1 sfnt/TTC face, declared post-8.5 MacRoman, Rustybuzz Latin/LTR shaping, fixed optional features, opt-in kerning, genuine glyph paths; approximate-only |
 | Classic outline/multibyte/color text, synthetic FOND styles, script-specific justification | Unsupported; no silent substitution; scaling-disabled nonunit ratios and nonpositive ratios fail |
 | Classic screen emulation | Not implemented |
 
@@ -74,7 +74,7 @@ modes, device states or historical edge rules are supported.
 | `03`-`06`, `0D`, `10`, `15`-`16` text state | Implemented exact supplied-font binding and portable layout; unsupported combinations fail at text use |
 | `0E`-`0F`, `12`-`14`, `1A`-`1F` color/pixel-pattern/highlight/OpColor state | Implemented; explicit highlight/OpColor needed where not recorded; restricted PixMap layouts |
 | `20`-`23` Line/LineFrom/ShortLine/ShortLineFrom | Implemented; diagonal pens approximate, source-only preserved frames use shared pixel coverage |
-| `28`-`2B` LongText/DHText/DVText/DHDVText | Implemented with supplied NFNT/FONT or explicit portable MacRoman TrueType binding; no inferred encoding/font |
+| `28`-`2B` LongText/DHText/DVText/DHDVText | Implemented with supplied NFNT/FONT or explicit portable MacRoman TrueType/CFF1 binding; no inferred encoding/font |
 | `2C` fontName | Retained metadata, deliberately not font discovery or substitution |
 | `2D` lineJustify; `2E` glyphState | Known records parsed; nonzero justification and PreserveGlyph unsupported; other flags depend on font/layout profile |
 | `30`-`34`, `38`-`3C` rectangles | All five verbs and same-rectangle forms implemented |
@@ -260,7 +260,8 @@ directory bounds, truncation, duplicate pairs, width precedence/disablement,
 scaled signed pair adjustments, run boundaries, unavailable scripts and resource
 limits. FOND widths/kerning also pass through real CLI PNG/SVG/PDF conversion;
 PDFium comparisons include clipping, origins and text masks.
-Outline fixtures `portable-outline.ttf` and `portable-outline.ttc` are original
+Outline fixtures `portable-outline.ttf`, `portable-outline.ttc`,
+`portable-outline-cff.otf` and `portable-outline-mixed.ttc` are original
 MIT-licensed geometric glyphs, generated with fontTools by
 `scripts/generate_outline_fixtures.py`. They are not extracted system fonts or
 historical samples; the private-use mapping uses an original box, not a logo.
@@ -274,6 +275,15 @@ exterior pixels. Destination modes compare explicit whole-composite fallback.
 Exact PDF/raster comparisons use integral outline edges: PDFium and binary
 pixel-center coverage can choose different edge pixels at fractional boundaries,
 which is an explicit presentation distinction, not an ignored test failure.
+CFF fixtures contain actual cubic curves, local/global subroutines, stems/masks
+and an empty space. fontTools independently decompiles the compiled font into
+`portable-outline-cff.json`; document tests compare those cubic controls with
+PDF/SVG paths and compare raster coverage with an independent cubic equation.
+PDFium checks CFF interior/exterior samples, spacing, origin/clip, source and
+destination modes, including the selected CFF face in a mixed TTC. Malformed
+INDEX/DICT/mask/program tests and shallow exponentially expanded subroutine tests
+exercise allocation, nesting and total-work limits. Existing TrueType fixture
+bytes and behavior are preserved. No third-party glyph data is copied.
 
 The tests' truth tables and selected expected pixels establish the declared
 implementation profile, **not independent rendering fidelity**. The mutation
@@ -383,6 +393,17 @@ jobs is not evidence that Windows tests passed.
   [Rustybuzz](https://docs.rs/rustybuzz/0.20.1/rustybuzz/) and its ttf-parser
   dependency provide portable shaping and contour extraction, not Font Manager
   emulation. Locked versions and redistribution notices travel with CLI assets.
+* Adobe [CFF specification #5176](https://adobe-type-tools.github.io/font-tech-notes/pdfs/5176.CFF.pdf)
+  and [Type 2 charstrings #5177](https://adobe-type-tools.github.io/font-tech-notes/pdfs/5177.Type2.pdf):
+  INDEX/DICT layout, subroutine bias/calls, widths, masks, stacks and cubic operators.
+  [OpenType CFF](https://learn.microsoft.com/en-us/typography/opentype/spec/cff)
+  specifies single-font Type 2 tables and matching glyph counts.
+* [QuickDraw Appendix A footnote 2](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-461.html)
+  identifies lineJustify's extra-character and total-style-run Fixed operands.
+  [DrawJustified](https://preterhuman.net/macstuff/techpubs/mac/Text/Text-160.html)
+  describes script-dependent slop and temporary SpExtra additions. Neither
+  establishes the missing recorded-state replay mapping described in the CLI
+  contract; nonzero Roman lineJustify remains unsupported rather than guessed.
 
 ## Readiness
 
@@ -396,7 +417,7 @@ contract, not a requirement to implement every imaginable historical extension.
 | Component readiness checklist | Status / gate |
 | --- | --- |
 | Explicit inputs, formats, limits, exit codes, safe outputs and qualified success | Implemented; consumer must preserve originals and diagnostics |
-| Font usability without platform font discovery | Implemented for supplied NFNT/FONT, explicit Roman FOND, and explicitly declared portable MacRoman/static TrueType outline bindings; no user fonts shipped |
+| Font usability without platform font discovery | Implemented for supplied NFNT/FONT, explicit Roman FOND, and explicitly declared portable MacRoman/static TrueType or supported CFF1 outline bindings; no user fonts shipped |
 | Source-only preserved SVG/PDF and safe destination-dependent output | Implemented subset; caller must explicitly choose whole-picture raster where preserved vectors cannot represent the operations |
 | Native executable and reproducible package evidence | Three-target CI verifies macOS ARM64/x64 and Windows x64; gate each selected revision on its actual successful run and verified manifests/hashes |
 | Product acceptance of the supported matrix | Coordinator/user decision remains: accept explicit unsupported outcomes and portable approximations, or identify required additional input features |
@@ -409,8 +430,8 @@ contract, not a requirement to implement every imaginable historical extension.
 | Gap | What can proceed without a historical oracle | Evidence or decision still needed |
 | --- | --- | --- |
 | Remaining family behavior | Documented synthetic-style properties and richer metadata inspection can be implemented if added to the supported contract | Negative version-0/1 values need a resolved representation contract or identified historical samples; current exact intrinsic bindings do not synthesize styles |
-| Outline fonts and encodings | Portable Roman static TrueType outlines implemented; CFF and other declared encodings can be added independently | Matching fonts and source encoding must be supplied. Classic metrics remain separate; non-Roman language/direction/shaping needs a new explicit contract |
-| Justification | The declared portable Roman outline profile now provides a basis for documented Roman spacing; implement and test the exact recorded lineJustify interpretation | Non-Roman script identity remains a contract decision; a raw NFNT does not identify a Script Manager environment |
+| Outline fonts and encodings | Portable Roman static TrueType and name-keyed Type 2 CFF1 implemented; CID/seac, variable/color fonts and other explicit encodings remain optional expansions | Matching fonts and source encoding must be supplied. Classic metrics remain separate; non-Roman language/direction/shaping needs a new explicit contract |
+| Justification | Existing explicit spacing/scaling works; nonzero lineJustify is still rejected even for Roman | Need authoritative playback interaction of extra-character/total-run operands with recorded SpExtra/ChExtra, scaling, trailing spaces and state lifetime, or provenance-backed recording/output pairs. Bare NFNT has no inferred script |
 | Embedded images | Indexed/direct/grayscale raw/Animation, RPZA, SMC, neutral description extensions, affine/alpha and OpColor blend implemented; other codecs and nonneutral presentation remain work | Separate PICT matte byte layout, coordinate mapping and mode interaction need a verified specification or provenance-backed samples; movie matte atoms are not sufficient evidence |
 | Preserved vector coverage | Shared diagonal/polygon/arc/complex-region frame paths implemented; destination-dependent operations still require full-composite fallback | Editable continuous geometry versus portable pixel-run presentation remains a fidelity choice; premultiplied source-over needs a representable precision contract before preserved-vector support |
 | Additional containers | Explicit native resource-fork access can build on current extraction; AppleSingle v2 is implemented | Filesystem behavior and deployment policy must be tested per platform |
@@ -422,12 +443,12 @@ fractional placement and whole-run compositing remain explicitly portable;
 historical chunk boundaries, cached font data, printer adjustments, global
 pattern phase and implicit system colors/fonts are not reconstructed.
 
-### Prioritized ordinary compatibility gaps after description/compositing support
+### Prioritized ordinary compatibility gaps after static CFF support
 
 | Priority by documented scope (not guessed corpus frequency) | Next implementable work / boundary |
 | --- | --- |
 | 1. Remaining existing-record variants | QuickTime OpColor transparency key (36), non-square pixel/clean-aperture presentation under an explicit PICT mapping contract, and color-management/gamma handling. Neutral suffixes, explicit grayscale and image blend are now implemented |
-| 2. Existing standard text operations | Portable Roman lineJustify and supported additional static outline formats such as CFF; retain supplied fonts, fixed encoding, spacing and feature contracts |
+| 2. Existing standard text operations | Nonzero Roman lineJustify is blocked on the specific replay evidence above, not on CFF or general historical accuracy. PreserveGlyph/extended text state and additional CFF profiles require their own documented supported semantics |
 | 3. Additional named still codecs / containers | Evaluate portable bounded TIFF/GIF/Cinepak decoders for self-contained images; `8201` only after its specific PICT layout is established; native resource-fork access is deployment convenience |
 | 4. New policies rather than guessed defaults | Default/resource image palettes require explicit identification/provenance; printer comment execution needs a defined supported comment contract; color management/device behavior is separate |
 
@@ -449,7 +470,19 @@ The user selected portable outline text first, with classic fidelity separate.
 That decision is now implemented as the explicit `portable_outline_v1` contract
 in the CLI documentation, without changing NFNT byte-addressed behavior. Matching
 lawfully usable fonts and declared MacRoman input are still required. Remaining
-outline implementation gaps are CFF/variable/color fonts, font resource-container
+outline implementation gaps are CID/seac and other excluded CFF variants,
+CFF2/variable/color fonts, font resource-container
 selection, synthetic faces and richer layout. Non-Roman scripts and pre-8.5
 currency-sign mappings need explicit encoding/language/direction contracts before
 support; classic Macintosh sfnt mapping and metrics are not claimed by this API.
+
+**Consolidated gate:** functional bounded ingestion, raster output, explicit
+text/image profiles and preserved SVG/PDF plus opt-in full-composite fallback
+are implemented. Missing lineJustify replay evidence and separate PICT matte
+layout are concrete compatibility blockers **for files using them**; neither is
+silently approximated. Classic device/font equivalence needs identified lawful
+reference outputs and a representative corpus. Additional codecs, CID fonts,
+printer comments and color management are feature-scope choices, not automatic
+blockers for accepting the defined subset. Product acceptance, durable signed
+distribution and the component adapter remain separate coordinator/user gates;
+this milestone does not authorize a component or release.

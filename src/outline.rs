@@ -8,6 +8,8 @@ use rustybuzz::{
 use serde::Deserialize;
 use std::sync::Arc;
 
+mod cff;
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutlineEncoding {
@@ -23,13 +25,14 @@ pub struct OutlineSelection {
     pub kerning: bool,
 }
 
-/// Explicit static TrueType outline data. No platform fonts or legacy mapping inference.
+/// Explicit static sfnt outline data. No platform fonts or legacy mapping inference.
 #[derive(Clone, Debug)]
 pub struct OutlineFont {
     data: Arc<[u8]>,
     selection: OutlineSelection,
     style: u8,
     complexity: usize,
+    cff: bool,
 }
 
 fn malformed(message: &str) -> Error {
@@ -84,9 +87,10 @@ impl OutlineFont {
             }
             0
         };
-        if data.get(start..start + 4) != Some(&[0, 1, 0, 0]) {
+        let cff = data.get(start..start + 4) == Some(b"OTTO");
+        if !cff && data.get(start..start + 4) != Some(&[0, 1, 0, 0]) {
             return Err(unsupported(
-                "portable outline profile requires static TrueType sfnt/TTC glyf outlines",
+                "portable outline profile requires static TrueType or CFF1 sfnt/TTC outlines",
             ));
         }
         let count = usize::from(word(data, start + 4)?);
@@ -106,9 +110,7 @@ impl OutlineFont {
         let face = ttf_parser::Face::parse(data, selection.face_index)
             .map_err(|_| malformed("invalid outline font face"))?;
         let raw = face.raw_face();
-        for tag in [
-            b"head", b"hhea", b"hmtx", b"maxp", b"cmap", b"loca", b"glyf", b"OS/2",
-        ] {
+        for tag in [b"head", b"hhea", b"hmtx", b"maxp", b"cmap", b"OS/2"] {
             if raw.table(Tag::from_bytes(tag)).is_none() {
                 return Err(malformed("required outline font table is missing"));
             }
@@ -117,8 +119,8 @@ impl OutlineFont {
             }
         }
         for tag in [
-            b"fvar", b"CFF ", b"CFF2", b"COLR", b"SVG ", b"sbix", b"CBDT", b"EBDT", b"morx",
-            b"mort", b"kerx", b"trak",
+            b"fvar", b"CFF2", b"COLR", b"SVG ", b"sbix", b"CBDT", b"EBDT", b"morx", b"mort",
+            b"kerx", b"trak",
         ] {
             if raw.table(Tag::from_bytes(tag)).is_some() {
                 return Err(unsupported(
@@ -129,36 +131,79 @@ impl OutlineFont {
         if face.ascender() <= face.descender() || face.units_per_em() == 0 {
             return Err(malformed("invalid outline font vertical metrics"));
         }
-        let head = raw.table(Tag::from_bytes(b"head")).unwrap();
-        let loca = raw.table(Tag::from_bytes(b"loca")).unwrap();
-        let glyf = raw.table(Tag::from_bytes(b"glyf")).unwrap();
-        let format = word(head, 50)?;
-        if format > 1 {
-            return Err(malformed("invalid TrueType loca format"));
-        }
         let glyphs = usize::from(face.number_of_glyphs());
         if glyphs > limits.max_operations {
             return Err(limit("outline glyph count limit exceeded"));
         }
-        let mut previous = 0;
-        budget.allocate((glyphs + 1) * std::mem::size_of::<usize>())?;
-        let mut offsets = Vec::with_capacity(glyphs + 1);
-        for i in 0..=glyphs {
-            let offset = if format == 0 {
-                usize::from(word(loca, i * 2)?) * 2
-            } else {
-                long(loca, i * 4)?
-            };
-            if offset < previous
-                || offset > glyf.len()
-                || (offset != previous && offset - previous < 10)
+        let complexity = if cff {
+            if raw.table(Tag::from_bytes(b"glyf")).is_some()
+                || raw.table(Tag::from_bytes(b"loca")).is_some()
             {
-                return Err(malformed("invalid TrueType glyph extent"));
+                return Err(malformed("mixed CFF and TrueType outline tables"));
             }
-            previous = offset;
-            offsets.push(offset);
-        }
-        let complexity = validate_glyph_graph(glyf, &offsets, &mut budget)?;
+            let data = raw
+                .table(Tag::from_bytes(b"CFF "))
+                .ok_or_else(|| malformed("missing CFF table"))?;
+            let cost = cff::validate(data, glyphs, face.units_per_em(), &mut budget)?;
+            let table = face
+                .tables()
+                .cff
+                .ok_or_else(|| malformed("invalid CFF table"))?;
+            for i in 0..glyphs {
+                let mut builder = Builder {
+                    segments: Vec::new(),
+                    budget: &mut budget,
+                    error: None,
+                    scale: [1.0, 1.0],
+                    origin: [0.0, 0.0],
+                };
+                let result = table.outline(GlyphId(i as u16), &mut builder);
+                if let Some(error) = builder.error {
+                    return Err(error);
+                }
+                if result.is_err()
+                    && !(result == Err(ttf_parser::CFFError::ZeroBBox)
+                        && builder.segments.is_empty())
+                {
+                    return Err(malformed("invalid CFF glyph outline"));
+                }
+            }
+            cost
+        } else {
+            if raw.table(Tag::from_bytes(b"CFF ")).is_some() {
+                return Err(malformed("mixed TrueType and CFF outline tables"));
+            }
+            let head = raw.table(Tag::from_bytes(b"head")).unwrap();
+            let loca = raw
+                .table(Tag::from_bytes(b"loca"))
+                .ok_or_else(|| malformed("missing TrueType loca table"))?;
+            let glyf = raw
+                .table(Tag::from_bytes(b"glyf"))
+                .ok_or_else(|| malformed("missing TrueType glyf table"))?;
+            let format = word(head, 50)?;
+            if format > 1 {
+                return Err(malformed("invalid TrueType loca format"));
+            }
+            let mut previous = 0;
+            budget.allocate((glyphs + 1) * std::mem::size_of::<usize>())?;
+            let mut offsets = Vec::with_capacity(glyphs + 1);
+            for i in 0..=glyphs {
+                let offset = if format == 0 {
+                    usize::from(word(loca, i * 2)?) * 2
+                } else {
+                    long(loca, i * 4)?
+                };
+                if offset < previous
+                    || offset > glyf.len()
+                    || (offset != previous && offset - previous < 10)
+                {
+                    return Err(malformed("invalid TrueType glyph extent"));
+                }
+                previous = offset;
+                offsets.push(offset);
+            }
+            validate_glyph_graph(glyf, &offsets, &mut budget)?
+        };
         for tag in [b"GSUB", b"GPOS", b"GDEF", b"kern"] {
             let exists = raw.table(Tag::from_bytes(tag)).is_some();
             let parsed = match tag {
@@ -177,6 +222,7 @@ impl OutlineFont {
             selection,
             style,
             complexity,
+            cff,
         })
     }
     pub(crate) fn style(&self) -> u8 {
@@ -204,6 +250,7 @@ impl OutlineFont {
         budget.work(
             (self.complexity as u64)
                 .checked_mul(bytes.len() as u64)
+                .and_then(|n| n.checked_mul(if self.cff { 4 } else { 1 }))
                 .ok_or_else(|| limit("outline expansion work overflow"))?,
         )?;
         // Shaper-owned allocations/work cannot be interrupted. Bound the Roman run and
@@ -300,15 +347,30 @@ impl OutlineFont {
                 origin: [ox as f64 / 65536.0, oy as f64 / 65536.0],
             };
             let gid = GlyphId(info.glyph_id as u16);
-            let outlined = face.outline_glyph(gid, &mut builder);
+            let outlined = if self.cff {
+                let result = face
+                    .tables()
+                    .cff
+                    .ok_or_else(|| malformed("missing validated CFF table"))?
+                    .outline(gid, &mut builder);
+                if result.is_err()
+                    && !(result == Err(ttf_parser::CFFError::ZeroBBox)
+                        && builder.segments.is_empty())
+                {
+                    return Err(malformed("invalid CFF glyph outline"));
+                }
+                result.ok()
+            } else {
+                face.outline_glyph(gid, &mut builder)
+            };
             if let Some(error) = builder.error {
                 return Err(error);
             }
-            if outlined.is_none() && face.glyph_bounding_box(gid).is_some() {
+            if !self.cff && outlined.is_none() && face.glyph_bounding_box(gid).is_some() {
                 return Err(malformed("outline glyph could not be decoded"));
             }
             // Empty spaces are valid, failed nonempty glyph decoding is not.
-            if outlined.is_none() && !empty_glyph(&face, gid)? {
+            if !self.cff && outlined.is_none() && !empty_glyph(&face, gid)? {
                 return Err(malformed("invalid or unsupported nonempty TrueType glyph"));
             }
             let path = builder.segments;

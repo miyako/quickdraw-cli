@@ -4,6 +4,7 @@ import io
 from fractions import Fraction
 from contextlib import closing
 import os
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -55,11 +56,11 @@ class Documents(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
-    def outline_map(self):
-        font = Path(__file__).resolve().parent.parent / "tests/fixtures/portable-outline.ttf"
+    def outline_map(self, filename="portable-outline.ttf", face_index=0):
+        font = Path(__file__).resolve().parent.parent / "tests/fixtures" / filename
         path = self.root / "outline.json"
         path.write_text(json.dumps({"schema":1,"fonts":[{"id":7,"size":10,"path":str(font),
-                                                      "outline":{"face_index":0,"encoding":"macroman","kerning":True}}]}))
+                                                      "outline":{"face_index":face_index,"encoding":"macroman","kerning":True}}]}))
         return ("--font-map",str(path),"--fidelity","approximate")
 
     def test_outline_shaping_spacing_masks_and_clips_match_independent_pdf(self):
@@ -105,6 +106,64 @@ class Documents(unittest.TestCase):
                 result,_=self.convert("pdf",operations=ops,frame=(0,0,24,60),extra=extra)
                 self.assertEqual(result.returncode,5,result.stderr)
                 self.compare_pdf_with_raster(ops,frame=(0,0,24,60),extra=extra,policy="raster")
+
+    def test_cff_cubics_match_independently_decompiled_font_and_pixel_centers(self):
+        reference=json.loads((Path(__file__).resolve().parent.parent/"tests/fixtures/portable-outline-cff.json").read_text())
+        controls=next(points for op,points in reference["paths"]["C"] if op=="curveTo")
+        expected=[v for x,y in controls for v in (2+x/100,12-y/100)]
+        extra=self.outline_map("portable-outline-cff.otf")
+        ops=[(3,words(7)),(0x0d,words(10)),(0x15,words(0)),(0x28,words(12,2)+b"\x01C")]
+        for extension in ["pdf","svg"]:
+            result,target=self.convert(extension,operations=ops,frame=(0,0,24,60),extra=extra)
+            self.assertEqual(result.returncode,0,result.stderr)
+            if extension=="pdf":
+                page=PdfReader(target,strict=True).pages[0]
+                curves=[list(map(float,args)) for args,op in page.get_contents().operations if op==b"c"]
+                self.assertNotIn("/XObject",page["/Resources"])
+                with closing(pdfium.PdfDocument(str(target))) as document,closing(document[0]) as p,closing(p.render(scale=2,no_smoothpath=True)) as bitmap:
+                    image=bitmap.to_pil().convert("RGB")
+                    self.assertEqual(image.getpixel((5,7)),(0,0,0))
+                    self.assertEqual(image.getpixel((5,4)),(255,255,255))
+            else:
+                tree=ET.parse(target)
+                self.assertFalse(tree.findall(".//{http://www.w3.org/2000/svg}image"))
+                curves=[]
+                for path in tree.findall(".//{http://www.w3.org/2000/svg}path"):
+                    for match in re.finditer(r"C([^A-Za-z]+)",path.get("d","")):
+                        curves.append([float(n) for n in match.group(1).split()])
+            self.assertEqual(len(curves),1)
+            self.assertEqual(len(curves[0]),len(expected))
+            for actual,want in zip(curves[0],expected):
+                self.assertAlmostEqual(actual,want,places=6)
+        result,target=self.convert("png",operations=ops,frame=(0,0,24,60),extra=extra)
+        self.assertEqual(result.returncode,0,result.stderr)
+        with Image.open(target) as rendered:
+            image=rendered.convert("RGB")
+            for y in range(24):
+                for x in range(60):
+                    gx=(x+0.5-2)*100;gy=(12-y-0.5)*100
+                    lo,hi=0.0,1.0
+                    for _ in range(50):
+                        t=(lo+hi)/2
+                        if 600*(1-3*t*t+2*t*t*t)>gx:lo=t
+                        else:hi=t
+                    inside=0<gx<600 and 0<gy<2700*t*(1-t)
+                    self.assertEqual(image.getpixel((x,y)),(0,0,0) if inside else (255,255,255),(x,y))
+
+    def test_cff_spacing_origin_clip_and_destination_fallback_match_pdfium(self):
+        for filename,index in [("portable-outline-cff.otf",0),("portable-outline-mixed.ttc",1)]:
+            extra=self.outline_map(filename,index)
+            for mode in [0,1,36,64,2,32,38,66]:
+                with self.subTest(font=filename,mode=mode):
+                    ops=[(0x31,words(0,0,24,60)),(3,words(7)),(0x0d,words(10)),(0x15,words(0)),
+                         (0x10,words(2,2,1,1)),(6,struct.pack(">i",32768)),(0x16,words(1)),
+                         (0x0c,words(2,1)),(1,words(10,1,3,21,53)),(0x1f,words(16384,16384,16384)),
+                         (5,words(mode)),(0x28,words(12,2)+b"\x04AV O")]
+                    policy="raster" if mode in [2,32,38,66] else "preserve"
+                    if policy=="raster":
+                        result,_=self.convert("svg",operations=ops,frame=(0,0,24,60),extra=extra)
+                        self.assertEqual(result.returncode,5,result.stderr)
+                    self.compare_pdf_with_raster(ops,frame=(0,0,24,60),extra=extra,policy=policy)
 
     def test_legacy_block_codecs_match_reference_and_preserve_affine_masked_layers(self):
         cases = json.loads((Path(__file__).resolve().parent.parent / "tests/fixtures/quicktime-blocks.json").read_text())["cases"]

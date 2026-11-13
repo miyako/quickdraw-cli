@@ -493,15 +493,20 @@ impl TextState {
         Ok(())
     }
     pub fn check_for(&self, outline: bool) -> Result<()> {
+        if self.unsupported_justify {
+            return Err(Error::new(
+                ErrorCode::Unsupported,
+                "nonzero lineJustify is unsupported: the recorded extra-character and total-run widths lack a verified replay mapping to SpExtra/ChExtra and scaling",
+            ));
+        }
         if self.ratio.iter().any(|&n| n <= 0)
-            || self.unsupported_justify
             || (!outline && self.unsupported_glyphs)
             || (outline && self.preserve_glyphs)
             || (self.scaling_disabled && self.scaled())
         {
             return Err(Error::new(
                 ErrorCode::Unsupported,
-                "nonpositive/disabled text scaling, script-specific justification, bitmap outline preference or outline preserveGlyph request is unsupported",
+                "nonpositive/disabled text scaling, bitmap outline preference or outline preserveGlyph request is unsupported",
             ));
         }
         if !matches!(self.base_mode(), 0..=7 | 32..=39) || self.mode & !0x7f != 0 {

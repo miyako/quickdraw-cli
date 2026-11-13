@@ -164,8 +164,9 @@ each resource; collection bytes and binding count are also bounded.
 This additive schema-1 binding selects `portable_outline_v1`, **not classic
 outline fidelity**. `face_index` and `encoding` are required; `kerning` defaults
 to false. A standalone sfnt requires index 0; a TTC requires the exact in-range
-face index. The profile accepts static TrueType `glyf` outlines with a Unicode
-cmap and OS/2 style/metrics. CFF/CFF2, variable/color/bitmap font formats and AAT
+face index. The profile accepts static TrueType `glyf` or name-keyed static CFF1
+Type 2 outlines with a Unicode cmap and OS/2 style/metrics. CFF2,
+variable/color/bitmap font formats and AAT
 layout tables are explicitly unsupported. Font resource containers are not
 outline containers in this profile: `outline` cannot be combined with
 `container`, `resource` or `family`. Existing bitmap bindings keep their contract.
@@ -174,6 +175,21 @@ bindings. Size must be positive; only intrinsic regular/bold/italic style bits
 are accepted, matching the supplied font's OS/2 flags. Underline, outline,
 shadow, condensed/extended and other synthetic face operations are not invented.
 No file is discovered by family name, and no font files are shipped for users.
+
+CFF1 uses the same binding, including `.otf` and mixed-outline TTC files. Ordinary
+lines/cubic curves/flex, stems/hint masks, and numeric local/global subroutine
+calls are supported; rasterization is intentionally unhinted. CFF FontMatrix must
+equal the sfnt design-unit scale, with no shear, translation or axis inversion.
+CID-keyed CFF, deprecated `seac` components, synthetic/embedded PostScript,
+arithmetic/transient-stack operators unsupported by the pinned outline library,
+and nonstandard matrices fail explicitly. These are a declared static CFF subset,
+not an assertion that every static OpenType font works.
+INDEX/DICT extents, operands and masks are checked before contour decoding;
+each glyph's expanded program is bounded by the operation/work budgets, with
+at most 48 operands, 96 stems and ten subroutine levels. All glyph programs are
+preflighted before shaping, including unused glyphs. Contour allocation and
+parse/expanded-program work are charged to resource budgets; limits also apply
+when rendering with an already loaded font.
 
 `encoding:"macroman"` explicitly asserts Apple's **post-Mac OS 8.5** Roman
 mapping, including byte `DB` to U+20AC (euro), `BD` to U+03A9 and `F0` to U+F8FF.
@@ -204,6 +220,17 @@ bound the whole-run text plane. `FractEnable` does not quantize scalable
 outline advances: this profile always retains fractions. `OutlinePreferred`
 can be honored by an explicit outline binding; `PreserveGlyph`, nonzero
 script-specific line justification and disabled nonunit scaling still fail.
+
+**Nonzero `lineJustify` evidence boundary:** Appendix A footnote 2 identifies
+the two Fixed operands as Script Manager extra character width and total extra
+width added to a style run. `DrawJustified` describes temporary additions to
+SpExtra, but those descriptions do not establish replay's interaction with
+already-recorded SpExtra/ChExtra, TxRatio, trailing spaces and state lifetime.
+The converter neither redistributes total width nor adds both operands again.
+Even declared Roman input returns an explicit unsupported error until an
+authoritative replay mapping or provenance-backed recorded-state/output pair
+establishes that interaction. Zero records retain existing behavior. Bare bitmap
+inputs do not acquire a Roman script by implication.
 
 All outline use requires `--fidelity approximate`, even at native size. Each use
 reports `explicit_outline_font` and an approximation diagnostic; conversion JSON

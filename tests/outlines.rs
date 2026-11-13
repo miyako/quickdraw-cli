@@ -8,6 +8,8 @@ use std::{fs, process::Command};
 
 const FONT: &[u8] = include_bytes!("fixtures/portable-outline.ttf");
 const TTC: &[u8] = include_bytes!("fixtures/portable-outline.ttc");
+const CFF: &[u8] = include_bytes!("fixtures/portable-outline-cff.otf");
+const MIXED: &[u8] = include_bytes!("fixtures/portable-outline-mixed.ttc");
 fn selection(index: u32, kern: bool) -> OutlineSelection {
     OutlineSelection {
         face_index: index,
@@ -16,6 +18,9 @@ fn selection(index: u32, kern: bool) -> OutlineSelection {
     }
 }
 fn options(kern: bool) -> RenderOptions {
+    options_for(FONT, 0, kern)
+}
+fn options_for(data: &[u8], index: u32, kern: bool) -> RenderOptions {
     let limits = Limits::default();
     let mut fonts = FontBook::default();
     fonts
@@ -23,7 +28,7 @@ fn options(kern: bool) -> RenderOptions {
             7,
             10,
             0,
-            OutlineFont::parse(FONT, selection(0, kern), &limits).unwrap(),
+            OutlineFont::parse(data, selection(index, kern), &limits).unwrap(),
             &limits,
         )
         .unwrap();
@@ -56,6 +61,192 @@ fn pixels(p: Pict, options: &RenderOptions) -> Vec<u8> {
 }
 fn at(rgb: &[u8], x: usize, y: usize) -> &[u8] {
     &rgb[(y * 60 + x) * 3..(y * 60 + x) * 3 + 3]
+}
+
+#[test]
+fn cff_cubic_paths_and_mixed_collection_keep_explicit_font_contract() {
+    for (data, index) in [(CFF, 0), (MIXED, 1)] {
+        let opts = options_for(data, index, false);
+        let mut p = picture();
+        text(&mut p, 1, 12, b"CO");
+        let pic = parse(&p.finish(), Container::Raw, &opts.limits).unwrap();
+        let svg = String::from_utf8(
+            export_vector(&pic, &opts, 72., VectorFormat::Svg)
+                .unwrap()
+                .bytes,
+        )
+        .unwrap();
+        let curve = svg
+            .split(" C")
+            .nth(1)
+            .unwrap()
+            .split_ascii_whitespace()
+            .take(6)
+            .map(|n| n.parse::<f64>().unwrap());
+        for (actual, expected) in curve.zip([7., 3., 1., 3., 1., 12.]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        assert!(!svg.contains("<image"));
+        assert!(!svg.contains("<text"));
+        let pdf = export_vector(&pic, &opts, 72., VectorFormat::Pdf)
+            .unwrap()
+            .bytes;
+        assert!(pdf.windows(3).any(|v| v == b" c\n"));
+        let rgb = render(&pic, &opts).unwrap().image.rgb().to_vec();
+        assert_eq!(at(&rgb, 4, 6), &[0; 3]);
+        assert_eq!(at(&rgb, 4, 4), &[255; 3]);
+        for bytes in [b"Z".as_slice(), &[0], &[127]] {
+            let mut p = picture();
+            text(&mut p, 0, 10, bytes);
+            assert_eq!(
+                render(
+                    &parse(&p.finish(), Container::Raw, &opts.limits).unwrap(),
+                    &opts
+                )
+                .unwrap_err()
+                .code,
+                ErrorCode::Unsupported
+            );
+        }
+        assert_eq!(
+            OutlineFont::parse(data, selection(index + 1, false), &opts.limits)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArguments
+        );
+    }
+}
+
+#[test]
+fn cff_subroutines_hints_and_empty_glyphs_share_spacing_clipping_and_transfer_layout() {
+    let mut cases = Vec::new();
+    let mut p = picture();
+    p.op(0x10, &words(&[1, 2, 1, 1]))
+        .op(6, &0x8000i32.to_be_bytes())
+        .op(0x16, &word(1));
+    text(&mut p, 0, 10, b"A A");
+    p.op(0x21, &words(&[10, 48]));
+    cases.push(p);
+    let mut p = picture();
+    p.op(0x0c, &words(&[2, 1]))
+        .op(1, &region([1, 4, 20, 15], &[]));
+    text(&mut p, 2, 11, b"A");
+    p.op(0x29, &[7, 1, b'A']);
+    cases.push(p);
+    let mut p = picture();
+    p.op(5, &word(2)).op(0x16, &word(-7));
+    text(&mut p, 1, 10, b"AA");
+    cases.push(p);
+    for p in cases {
+        let pic = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
+        let opts = options_for(CFF, 0, false);
+        assert_eq!(
+            render(&pic, &opts).unwrap().image.rgb(),
+            render(&pic, &options(false)).unwrap().image.rgb()
+        );
+        for format in [VectorFormat::Svg, VectorFormat::Pdf] {
+            let cff = export_vector(&pic, &opts, 72., format);
+            let ttf = export_vector(&pic, &options(false), 72., format);
+            assert_eq!(cff.is_ok(), ttf.is_ok());
+            if let Err(error) = cff {
+                assert_eq!(error.code, ErrorCode::Unsupported);
+            }
+        }
+    }
+}
+
+#[test]
+fn cff_malformed_tables_and_active_budgets_fail_without_substitution() {
+    let limits = Limits::default();
+    let table = (0..u16::from_be_bytes([CFF[4], CFF[5]]) as usize)
+        .map(|i| 12 + i * 16)
+        .find(|&at| &CFF[at..at + 4] == b"CFF ")
+        .unwrap();
+    let at = u32::from_be_bytes(CFF[table + 8..table + 12].try_into().unwrap()) as usize;
+    for (offset, value, code) in [
+        (at + 6, 0, ErrorCode::Malformed),
+        (at + 7, 0, ErrorCode::Malformed),
+        (at, 2, ErrorCode::Unsupported),
+        (table + 3, b'2', ErrorCode::Unsupported),
+    ] {
+        let mut bad = CFF.to_vec();
+        bad[offset] = value;
+        assert_eq!(
+            OutlineFont::parse(&bad, selection(0, false), &limits)
+                .unwrap_err()
+                .code,
+            code
+        );
+    }
+    for small in [
+        Limits {
+            max_decoded_bytes: 1000,
+            ..limits.clone()
+        },
+        Limits {
+            max_operations: 16,
+            ..limits.clone()
+        },
+        Limits {
+            max_work: CFF.len() as u64 + 100,
+            ..limits.clone()
+        },
+    ] {
+        assert_eq!(
+            OutlineFont::parse(CFF, selection(0, false), &small)
+                .unwrap_err()
+                .code,
+            ErrorCode::ResourceLimit
+        );
+    }
+    let mut opts = options_for(CFF, 0, false);
+    opts.limits.max_work = 10000;
+    let mut p = picture();
+    text(&mut p, 0, 10, b"AAAA");
+    assert_eq!(
+        render(&parse(&p.finish(), Container::Raw, &limits).unwrap(), &opts)
+            .unwrap_err()
+            .code,
+        ErrorCode::ResourceLimit
+    );
+}
+
+#[test]
+fn nonzero_linejustify_rejects_unverified_replay_without_inventing_spacing() {
+    for font in [FONT, CFF] {
+        let opts = options_for(font, 0, false);
+        // Appendix A's example is one pixel extra per character, ten per run.
+        for (character, total) in [
+            (65536i32, 655360i32),
+            (-32768, -327680),
+            (0, 65536),
+            (65536, 0),
+        ] {
+            let mut payload = word(8);
+            payload.extend(character.to_be_bytes());
+            payload.extend(total.to_be_bytes());
+            let mut p = picture();
+            p.op(6, &65536i32.to_be_bytes())
+                .op(0x16, &word(1))
+                .op(0x2d, &payload);
+            text(&mut p, 1, 10, b"A A");
+            let pic = parse(&p.finish(), Container::Raw, &opts.limits).unwrap();
+            let error = render(&pic, &opts).unwrap_err();
+            assert_eq!(error.code, ErrorCode::Unsupported);
+            assert!(error.message.contains("lineJustify"));
+            for format in [VectorFormat::Svg, VectorFormat::Pdf] {
+                assert_eq!(
+                    export_vector(&pic, &opts, 72., format).unwrap_err().code,
+                    ErrorCode::Unsupported
+                );
+            }
+        }
+        let mut p = picture();
+        p.op(0x2d, &[0, 8, 0, 1, 0, 0, 0, 10, 0, 0])
+            .op(0x2d, &[0, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+        text(&mut p, 1, 10, b"A");
+        assert_eq!(at(&pixels(p, &opts), 1, 4), &[0; 3]);
+    }
 }
 
 #[test]
