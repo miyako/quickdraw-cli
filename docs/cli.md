@@ -12,6 +12,7 @@ network fetch, font substitution, or side-effecting configuration.
 quickdraw --version
 quickdraw capabilities
 quickdraw list-pictures --input PATH [INPUT OPTIONS]
+quickdraw list-fonts --input PATH [INPUT OPTIONS]
 quickdraw inspect --input PATH [INPUT OPTIONS] [SELECTION OPTIONS]
 quickdraw convert --input PATH --output PATH [INPUT OPTIONS] [CONVERSION OPTIONS]
 quickdraw --help
@@ -25,12 +26,12 @@ default limits and exit codes. Help is human-readable text on stdout, exit 0.
 All other commands use the JSON contract below. There is deliberately no inert
 `--json`, system-font-search, or pixel-perfect switch.
 
-### Input options (list-pictures, inspect and convert)
+### Input options (list-pictures, list-fonts, inspect and convert)
 
 | Argument | Default | Behavior |
 | --- | --- | --- |
 | `--input PATH` | required | One regular file; never modified |
-| `--container auto\|raw\|file\|resource-fork\|macbinary\|appledouble` | `auto` | Explicit layout or unambiguous header detection; no arbitrary signature scan |
+| `--container auto\|raw\|file\|resource-fork\|macbinary\|appledouble\|applesingle` | `auto` | Explicit layout or unambiguous header detection; no arbitrary signature scan |
 | `--max-input-bytes N` | 67108864 | Maximum file bytes, checked before and during reading |
 | `--max-pixels N` | 16000000 | Maximum frame, bitmap, region, and output pixel count, individually |
 | `--max-decoded-bytes N` | 134217728 | Cumulative decoded/scratch allocation accounting per parsing/rendering/vector phase; also bounds aggregate loaded font bytes |
@@ -48,7 +49,7 @@ small requested output does not bypass the native frame limit.
 
 An extracted resource payload is `raw`, not a resource-fork map. A data-fork PICT
 file with a 512-byte header is `file`. Resource-fork maps, MacBinary I/II/III and
-AppleDouble v2 can contain multiple candidates; selection never silently picks
+AppleDouble/AppleSingle v2 can contain multiple candidates; selection never silently picks
 the first. Each selected PICT payload must have no trailing data.
 PICT v1 nonzero `picSize` must equal consumed bytes; zero is accepted as unspecified.
 PICT v2 `picSize` is ignored, per the format documentation.
@@ -80,8 +81,11 @@ header CRCs, fork extents and zero fork padding are checked; secondary headers
 and Finder comments are skipped using their declared lengths. Packed MacBinary
 is unsupported. AppleDouble entry IDs/ranges must be nonoverlapping and unique;
 only its resource fork is examined. Its separate data-fork companion is never
-opened implicitly: supply that file itself as another input. AppleSingle and
-automatic access to native filesystem resource-fork streams are not implemented.
+opened implicitly: supply that file itself as another input. AppleSingle v2 uses
+the same bounded entry machinery but permits both data and resource forks;
+the same explicit picture selection rules apply. Entry order is immaterial.
+AppleSingle/AppleDouble v1 and automatic native filesystem resource-fork access
+are not implemented.
 
 Container scanning, selected-picture parsing and rendering have separate budgets.
 The input-byte limit applies to the complete container, not just the selected
@@ -101,7 +105,7 @@ exist outside the selected payload. The original file is preserved.
 | `--dpi NUMBER` | 72 | Finite, greater than zero and at most 100000; physical metadata only |
 | `--background RRGGBB` | `ffffff` | Opaque initial canvas RGB; six hex digits, no `#` prefix |
 | `--highlight RRGGBB` | unknown | Explicit system highlight color, used when no HiliteColor is in effect and after DefHilite; highlight use without either fails |
-| `--font-map PATH` | none | Schema-1 JSON binding exact source font ID/point size/face to extracted NFNT/FONT resources; no substitutions |
+| `--font-map PATH` | none | Schema-1 JSON binding exact source font ID/point size/face to raw or container-selected NFNT/FONT resources; no substitutions |
 | `--overwrite` | false | Allow atomic replacement of an unrelated regular output file |
 
 When both dimensions are supplied, output stretches to those dimensions.
@@ -144,12 +148,86 @@ metadata and never trigger system lookup. Include every exact binding used.
 Initial recorded font ID/size are zero unless changed by picture opcodes; no
 host-specific default font or size is invented.
 
-Only extracted one-bit NFNT/FONT data is accepted. No font-resource-fork loader,
-outline font conversion, synthetic styling, substitute-size selection,
+One-bit NFNT/FONT data can be raw or explicitly selected from a resource container.
+No outline font conversion, synthetic styling, substitute-size selection,
 missing-glyph box or substitution is performed. Single-byte codes address glyphs
 directly; no Unicode decoding, Script Manager shaping or multibyte layout is
 implemented. Each use reports `explicit_bitmap_font`. Input limits apply to the map and
 each resource; collection bytes and binding count are also bounded.
+
+#### Resource containers and FOND families (additive schema 1)
+
+```text
+quickdraw list-fonts --input fonts.as
+```
+
+The result is `{"protocol":1,"inventory":{"container":"applesingle",
+"resources":[...]}}`. Entries contain `resource_type` (`NFNT`, `FONT`, `FOND`),
+signed `resource_id`, opaque `name_hex` or null, and absolute `offset`/`length`.
+Inventory validates all container ranges, not font renderability. It never
+extracts files. Resource forks, MacBinary and AppleSingle/AppleDouble v2 work;
+raw PICT/file containers are not font containers.
+
+Select an exact resource without family metrics:
+
+```json
+{"schema":1,"fonts":[{"id":7,"size":12,"path":"fonts.as","container":"auto","resource":{"type":"NFNT","id":128}}]}
+```
+
+Or explicitly select a FOND association at the binding's exact `size`/`face`:
+
+```json
+{"schema":1,"fonts":[{"id":7,"size":12,"face":0,"path":"fonts.as","container":"auto","family":{"id":7,"script":"roman","kerning":false}}]}
+```
+
+`container` must be present when `resource` or `family` is used; `auto` is
+permitted. Without `container`, `path` retains its original raw-NFNT meaning.
+A container requires at least one selector. `family.id` is the FOND resource ID
+and must agree with its header family ID. The bitmap resource ID comes from
+its exact intrinsic monochrome size/style association, not a nearest strike.
+Size-zero sfnt associations and depth/style substitutions are unsupported.
+If both FONT and NFNT exist at the associated ID, selection is ambiguous:
+add `resource` to choose the type explicitly. Its ID must agree with the family
+association. Missing/conflicting/ambiguous selections fail, never pick the first.
+
+`family.script` is mandatory and accepts only `roman`; family IDs must be
+0..16383. This is an explicit caller assertion, not encoding detection. It does
+not translate character bytes or implement Script Manager behavior. Unknown
+script strings are invalid font-map arguments (exit 2); unsupported family
+semantics fail with exit 5. Bare fonts retain their direct byte-addressed contract.
+
+FOND widths are signed one-point 4.12 values multiplied by the selected point
+size, used only for recorded fractional-width layout. NFNT optional 8.8 widths
+take precedence; otherwise the exact family style table is used unless ffFlags
+bit 14 disables it. With no enabled family table, integer NFNT advances remain
+the fallback. No style-property synthesis or missing-glyph replacement occurs.
+The missing-character width is parsed but never substituted; the final unused
+width word must be zero. Kerning subtables use **pair counts**, as clarified by
+Adobe TN 0091 figure 10, not the byte-length description in Apple's prose.
+
+`family.kerning` defaults to false. True explicitly opts into family pair
+adjustments **within each text opcode**, before positioning the second glyph.
+Amounts are multiplied by point size, then by the horizontal TxRatio, retaining
+fixed-point precision. They do not cross positioned runs or depend on the
+fractional-width flag. This always requires `--fidelity approximate` and emits
+an `approximation` diagnostic describing the policy: PICT does not establish
+whether its producer already kerned individual positions. Kerning is never
+silently enabled just because the supplied FOND has a table. A requested
+kerning style must exist; unspecified pairs have zero adjustment.
+
+Negative family values are supported for version 2 and later (two's complement).
+Negative version-0/1 values are rejected when selected: historical descriptions
+and readers disagree about one's-complement versus sign-magnitude representation.
+Nonnegative values remain usable. Header and optional-directory offsets,
+association uniqueness, table extents, width terminators, duplicate style/pair
+records, count/work/allocation limits are checked. Printer names/encoding maps,
+bounding-box tables and synthetic style properties are bounded opaque metadata,
+not applied to the explicitly bound intrinsic bitmap. Their semantic validity
+is not certified by this reader.
+
+Complete font container paths and aliases are protected from output replacement,
+just like raw font paths. Limits apply to each complete source, container scan,
+family parse and aggregate bound fonts; these are not a global process RSS cap.
 
 #### Portable text profile `portable_nfnt_v1`
 
@@ -161,9 +239,9 @@ out-of-range heights and tables excluding actual ink fail. Height hints never
 silently discard visible pixels or shrink the background transfer rectangle.
 Color/deep/synthetic NFNTs remain unsupported.
 
-`glyphState` fractional-widths selects the NFNT 8.8 advance table; when absent,
-integer NFNT advances are promoted to fixed point (Apple's documented no-family-
-table case). No FOND metrics are invented. `PreserveGlyph` concerns outline fonts
+`glyphState` fractional-widths selects the NFNT 8.8 advance table, then an
+explicitly selected enabled FOND table, then integer NFNT advances promoted to
+fixed point. No family is inferred. `PreserveGlyph` concerns outline fonts
 and has no effect on the supplied bitmap strike. Outline preference and nonzero
 `lineJustify` remain explicit errors. Scaling-disabled glyph state with a nonunit
 ratio is rejected rather than choosing a substitute strike.
@@ -202,7 +280,7 @@ pixels untouched. Overlapping glyphs therefore do not XOR each other away within
 one run. Separate text operations still composite in order against the complete
 destination. Apple's documented stack-dependent splitting can produce different
 historical results, hence the explicit portable policy. This does not recreate
-Script Manager, FOND kerning, printer spacing, or classic bitmap scaling.
+Script Manager, automatic family kerning, printer spacing, or classic bitmap scaling.
 
 ### Preserved vector policy
 

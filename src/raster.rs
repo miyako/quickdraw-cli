@@ -599,6 +599,18 @@ pub(crate) fn text_policy(
             "text uses portable fixed-point layout/nearest-neighbor scaling or whole-run compositing, not historical Font Manager/stack-dependent rendering",
         )?;
     }
+    if options
+        .fonts
+        .get(state.text.id, state.text.size, state.text.face)
+        .is_ok_and(|font| font.kerning_enabled())
+    {
+        require_approximate(
+            options,
+            diagnostics,
+            offset,
+            "explicit FOND pair kerning is applied within each text run; this is an opt-in layout policy, not inferred QuickDraw behavior",
+        )?;
+    }
     Ok(())
 }
 
@@ -653,8 +665,13 @@ pub(crate) fn layout_text<'a>(
         .get(state.text.id, state.text.size, state.text.face)?;
     budget.allocate(bytes.len() * std::mem::size_of::<PlacedGlyph<'_>>())?;
     let mut glyphs = Vec::with_capacity(bytes.len());
-    for &code in bytes {
-        let glyph = font.glyph(code)?;
+    for (index, &code) in bytes.iter().enumerate() {
+        if index != 0 {
+            x = x
+                .checked_add(state.text.scale(font.kern(bytes[index - 1], code), true)?)
+                .ok_or_else(|| Error::new(ErrorCode::ResourceLimit, "text kerning overflow"))?;
+        }
+        let glyph = font.glyph(code, state.text.fractional_widths)?;
         let left_fixed = x + state.text.scale(i64::from(glyph.bearing) * 65536, true)?;
         let top_fixed = i64::from(baseline.y) * 65536 + 0x8000
             - state.text.scale(i64::from(glyph.ascent) * 65536, false)?;

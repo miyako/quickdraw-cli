@@ -30,12 +30,14 @@ enum Action {
     Inspect(Inspect),
     /// List bounded picture candidates without choosing or rendering one.
     ListPictures(Input),
+    /// List bounded NFNT/FONT/FOND resource candidates without selecting a font.
+    ListFonts(Input),
     /// Describe the supported subset and versioned machine contract.
     Capabilities,
 }
 #[derive(Args)]
 struct Input {
-    /// PICT, resource fork, MacBinary or AppleDouble file; never modified.
+    /// PICT, resource fork, MacBinary, AppleSingle or AppleDouble file; never modified.
     #[arg(long)]
     input: PathBuf,
     #[arg(long, value_enum, default_value = "auto")]
@@ -138,7 +140,7 @@ struct Convert {
     /// Explicit system highlight color for pictures that do not carry HiliteColor.
     #[arg(long, value_parser = parse_color)]
     highlight: Option<[u8; 3]>,
-    /// JSON schema 1 mapping source font ID/size/face to extracted NFNT files.
+    /// JSON schema 1 mapping source font ID/size/face to explicit bitmap font sources.
     #[arg(long)]
     font_map: Option<PathBuf>,
     /// Atomically replace an existing regular output file, never the input or its aliases.
@@ -171,6 +173,9 @@ struct FontBinding {
     #[serde(default)]
     face: u8,
     path: PathBuf,
+    container: Option<Container>,
+    resource: Option<quickdraw::FontResourceSelection>,
+    family: Option<quickdraw::FontFamilySelection>,
 }
 fn load_fonts(
     path: Option<&Path>,
@@ -226,7 +231,28 @@ fn load_fonts(
     for binding in map.fonts {
         let font_path = path.parent().unwrap_or(Path::new(".")).join(binding.path);
         output_path(&font_path, output, true)?;
-        let font = quickdraw::BitmapFont::parse(&read(&font_path)?, limits)?;
+        let bytes = read(&font_path)?;
+        let font = if let Some(container) = binding.container {
+            quickdraw::BitmapFont::from_container(
+                &bytes,
+                container,
+                binding.size,
+                binding.face,
+                &quickdraw::FontSelection {
+                    resource: binding.resource,
+                    family: binding.family,
+                },
+                limits,
+            )?
+        } else {
+            if binding.resource.is_some() || binding.family.is_some() {
+                return Err(Error::new(
+                    ErrorCode::InvalidArguments,
+                    "resource/family selection requires an explicit container field (auto is permitted)",
+                ));
+            }
+            quickdraw::BitmapFont::parse(&bytes, limits)?
+        };
         book.insert(binding.id, binding.size, binding.face, font, limits)?;
         sources.push(font_path);
     }
@@ -356,7 +382,10 @@ fn capabilities() -> Value {
         "font_map_schema": 1,
         "text_profile": "portable_nfnt_v1",
         "text_modes": {"base": [0,1,2,3,4,5,6,7,32,33,34,35,36,37,38,39], "mask_flag":64},
-        "containers": ["auto", "raw", "file", "resource-fork", "macbinary", "appledouble"],
+        "containers": ["auto", "raw", "file", "resource-fork", "macbinary", "appledouble", "applesingle"],
+        "font_resource_types": ["NFNT", "FONT", "FOND"],
+        "font_family_scripts": ["roman"],
+        "font_family_kerning": "explicit_opt_in_within_text_run",
         "picture_selection": ["unique", "resource_id", "data_fork"],
         "quicktime_still_codecs": ["jpeg", "png "],
         "pict_versions": [1, 2],
@@ -379,7 +408,8 @@ fn capabilities() -> Value {
             "positive_text_ratios", "fractional_space_extra_and_pen_position",
             "text_boolean_arithmetic_transparency_and_mask",
             "svg_and_pdf_uniform_copy_geometry", "whole_picture_svg_pdf_raster",
-            "bounded_resource_maps", "macbinary_I_II_III", "appledouble_v2",
+            "bounded_resource_maps", "macbinary_I_II_III", "appledouble_v2", "applesingle_v2",
+            "explicit_font_resources", "fond_exact_bitmap_associations_widths_opt_in_kerning",
             "explicit_picture_selection", "embedded_jpeg_png_axis_aligned_srcCopy",
             "vector_bitmap_copy_notCopy_transparent", "vector_tiled_patterns"
         ],
@@ -387,13 +417,13 @@ fn capabilities() -> Value {
         "unsupported": [
             "implicit_system_fonts", "outline_fonts", "multibyte_text", "color_nfnt",
             "script_specific_line_justification", "nonpositive_or_disabled_text_scaling",
-            "grayishTextOr_not_recorded_in_pict", "font_family_tables",
+            "grayishTextOr_not_recorded_in_pict", "fond_synthetic_styles_and_legacy_negative_fixed",
             "dithering", "default_system_highlight_without_explicit_color",
             "vector_destination_dependent_modes",
             "vector_diagonal_polygon_arc_complex_region_frames",
             "other_quicktime_codecs", "quicktime_rotation_reflection_perspective",
             "quicktime_mattes_alpha_extended_descriptions_noncopy_modes",
-            "animated_png_cmyk_jpeg_16bit_still_images", "applesingle",
+            "animated_png_cmyk_jpeg_16bit_still_images",
             "classic_screen_pixel_identity"
         ],
         "default_limits": Limits::default(),
@@ -415,7 +445,7 @@ fn execute(cli: Cli) -> Result<Value> {
     match cli.command.ok_or_else(|| {
         Error::new(
             ErrorCode::InvalidArguments,
-            "expected convert, inspect, list-pictures, capabilities, --help or --version",
+            "expected convert, inspect, list-pictures, list-fonts, capabilities, --help or --version",
         )
     })? {
         Action::Capabilities => Ok(capabilities()),
@@ -434,6 +464,10 @@ fn execute(cli: Cli) -> Result<Value> {
             Ok(
                 json!({"protocol":1,"inventory":quickdraw::list_pictures(&bytes,input.container,&input.limits.value())?}),
             )
+        }
+        Action::ListFonts(input) => {
+            let bytes = read_input(&input)?;
+            Ok(json!({"protocol":1,"inventory":quickdraw::list_font_resources(&bytes,input.container,&input.limits.value())?}))
         }
         Action::Convert(args) => {
             let format = args

@@ -14,7 +14,7 @@ emits an operation-offset warning for every accepted approximation.
 | v1 byte opcodes; v2 word alignment, original/extended HeaderOp | Supported; nonzero padding rejected; required v2 header |
 | Extended header resolution and source rectangle | Resolution retained; source rectangle must equal picFrame; other mappings fail |
 | Raw PICT and 512-byte-header PICT files | Supported, explicit or unambiguous auto-detection |
-| Resource fork / MacBinary I-II-III / AppleDouble v2 | Bounded extraction, signed resource IDs, inventory and explicit data-fork/resource selection; no filesystem extraction or companion-file lookup |
+| Resource fork / MacBinary I-II-III / AppleDouble and AppleSingle v2 | Bounded extraction, signed resource IDs, inventory and explicit data-fork/resource selection; no filesystem extraction or companion-file lookup |
 | Rectangular and transition-encoded regions (`01`, `80`-`84`) | Clipping, paint, fill, erase, invert; strict rectangular frames; complex frames approximate |
 | Background/pen/fill 8x8 patterns (`02`, `09`, `0A`) | Supported, distinct state |
 | Pen size/mode (`07`, `08`) | Nonnegative rectangular pens; Boolean, arithmetic and highlight modes below |
@@ -35,6 +35,7 @@ emits an operation-offset warning for every accepted approximation.
 | Text (`28`-`2B`) | Explicit one-bit NFNT/FONT bindings; source modes 0-7, arithmetic/transparent 32-39 and mask 64; unioned run coverage, deltas from previous text start, advanced graphics pen |
 | Text ratios/fractions (`06`, `10`, `15`, `16`, `2E`) | Positive independent ratios, signed Fixed SpExtra, PnLocHFrac, integer PICT ChExtra, explicit fractional-width selection; nonnative layout requires approximate policy |
 | NFNT optional tables | Bounded 8.8 glyph advances and top-row/image-height entries; no silently omitted ink |
+| Font-resource selection / FOND | Explicit NFNT/FONT IDs or exact intrinsic FOND associations; mandatory Roman family assertion; optional fractional family widths after NFNT precedence; explicit approximate within-run kerning policy |
 | Printer comments (`A0`, `A1`) | Raw bytes and kind retained; strict fails; approximate warns that comment semantics are ignored |
 | Origin (`0C`) | Horizontal/vertical delta; local clip/pen/last-shape state preserved; prior pixels do not move |
 | Oval size / rounded rectangles (`0B`, `40` family) | Approximate elliptical corners, clamped diameters, inset framing |
@@ -47,12 +48,12 @@ emits an operation-offset warning for every accepted approximation.
 | QuickTime compressed (`8200`) | JPEG/PNG still decoding; restricted positive scale/translation, integral edges, source crop/mask, clip/origin and direct RGB srcCopy |
 | QuickTime uncompressed (`8201`) / other codecs | Explicitly unsupported; no silent substitute decoder |
 | Unknown opcodes / unknown length layouts | Fail with offset and opcode; no recovery by guessing |
-| AppleSingle / packed MacBinary / native resource-fork filesystem access | Unsupported; supply a supported file container |
+| AppleSingle/AppleDouble v1 / packed MacBinary / native resource-fork filesystem access | Unsupported; supply a supported file container |
 | PNG | Opaque RGB output |
 | SVG / PDF | Explicit whole-picture raster or supported genuine-path policy; PDF 1.4 single page |
 | Native vector subset | Source-only tiled patterns and embedded bitmap placements, shapes/regions, axis-aligned lines and NFNT runs; destination-dependent modes and diagonal/polygon/arc/complex-region frames require explicit whole-picture raster |
 | Remaining embedded-image gaps | Mattes, nonopaque alpha, noncopy QuickTime modes, rotation/reflection/perspective, fractional edges, extended descriptions, animation, CMYK/16-bit images |
-| Outline/multibyte/color text, FOND, script-specific justification | Unsupported; no silent substitution; scaling-disabled nonunit ratios and nonpositive ratios fail |
+| Outline/multibyte/color text, synthetic FOND styles, script-specific justification | Unsupported; no silent substitution; scaling-disabled nonunit ratios and nonpositive ratios fail |
 | Classic screen emulation | Not implemented |
 
 ## Raster profile `portable_rgb_v1`
@@ -115,7 +116,7 @@ nothing. Negative-size geometric rectangles have empty coverage.
 
 All fixtures in `tests/common`, `tests/core.rs`, `tests/bitmaps.rs` and
 `tests/cli.rs`, `tests/semantics.rs`, `tests/fonts.rs`, `tests/vectors.rs` and
-`tests/containers.rs`, `tests/quicktime.rs` and `scripts/test_documents.py` are
+`tests/containers.rs`, `tests/quicktime.rs`, `tests/font_resources.rs` and `scripts/test_documents.py` are
 authored synthetically in this repository. No reference
 repository pictures or expected image files are copied. Tests cover both PICT
 versions, header containers/alignment, lengths and truncation, mutation sweeps,
@@ -148,6 +149,12 @@ advances and explicit fonts; destination-dependent text is checked using the
 explicit whole-picture raster policy. Expected pixels are authored from the
 documented portable rules, not captured from a classic system.
 This is independent output-backend evidence, not independent QuickDraw fidelity.
+Font-resource fixtures construct original NFNT/FONT/FOND maps and AppleSingle
+entries. Cases cover exact/ambiguous associations, source aliases, optional
+directory bounds, truncation, duplicate pairs, width precedence/disablement,
+scaled signed pair adjustments, run boundaries, unavailable scripts and resource
+limits. FOND widths/kerning also pass through real CLI PNG/SVG/PDF conversion;
+PDFium comparisons include clipping, origins and text masks.
 
 The tests' truth tables and selected expected pixels establish the declared
 implementation profile, **not independent rendering fidelity**. The mutation
@@ -171,7 +178,17 @@ jobs is not evidence that Windows tests passed.
 * [Apple, printer comments](https://dev.os9.ca/techpubs/mac/QuickDraw/QuickDraw-465.html)
 * [Apple, resource file format](https://dev.os9.ca/techpubs/mac/MoreToolbox/MoreToolbox-99.html)
 * [MacBinary II specification](https://files.stairways.com/other/macbinaryii-standard-info.txt)
-* [RFC 1740, AppleDouble layout](https://www.rfc-editor.org/rfc/rfc1740.html)
+* [RFC 1740, AppleSingle/AppleDouble layouts](https://www.rfc-editor.org/rfc/rfc1740.html)
+* [Apple, FOND layout](https://leopard-adc.pepas.com/documentation/mac/Text/Text-269.html),
+  [associations](https://leopard-adc.pepas.com/documentation/mac/Text/Text-271.html),
+  [widths](https://leopard-adc.pepas.com/documentation/mac/Text/Text-274.html),
+  [kerning](https://leopard-adc.pepas.com/documentation/mac/Text/Text-276.html).
+* [Adobe TN 0091, Macintosh FOND Resources](https://adobe-type-tools.github.io/font-tech-notes/pdfs/0091.Mac_Fond.pdf):
+  52-byte header, width-table zero terminator and pair-count clarification.
+  Negative version-0/1 values remain unsupported because the stated
+  one's-complement convention conflicts with sign-magnitude interpretation in
+  [Monobit's FOND reader](https://github.com/robhagemans/monobit/blob/master/monobit/storage/fontformats/apple/fond.py).
+  Neither implementation nor font samples were copied.
 * QuickDrawViewer `QuickTime.swift` (read-only format comparison): compressed
   picture fields and source-region transition layout; no implementation copied.
   Matrix fields follow QuickTime 16.16 affine and 2.30 projective conventions.
@@ -201,25 +218,33 @@ jobs is not evidence that Windows tests passed.
 
 ## Readiness
 
-This is a usable **subset foundation**, not a fully capable conversion backbone.
-The versioned CLI and assets allow future wrapper integration work, but broad
-wrapper readiness remains limited by outline/multibyte/color font handling,
-remaining QuickTime codecs/transforms, modes/containers, vector coverage and
-independent corpus/fidelity validation. Explicit bitmap fonts and supported
-vector paths are usable, not a claim of complete font or printer support. A wrapper must not
-hide those failures or discard success warnings. No wrapper component, release
-publication, code signing or notarization is included in this repository.
+This is a usable **defined supported converter**, not a fully capable historical
+QuickDraw backbone. The supported contract is the matrix above plus
+`portable_rgb_v1`, `portable_nfnt_v1`, `portable_paths_v1` and JSON protocol 1.
+The component remains deferred. The gate is a decision about that explicit
+contract, not a requirement to implement every imaginable historical extension.
+
+| Component readiness checklist | Status / gate |
+| --- | --- |
+| Explicit inputs, formats, limits, exit codes, safe outputs and qualified success | Implemented; consumer must preserve originals and diagnostics |
+| Font usability without platform font discovery | Implemented for supplied one-bit raw/container NFNT/FONT and explicit Roman FOND bindings; no fonts shipped |
+| Source-only preserved SVG/PDF and safe destination-dependent output | Implemented subset; caller must explicitly choose whole-picture raster where preserved vectors cannot represent the operations |
+| Native executable and reproducible package evidence | Three-target CI verifies macOS ARM64/x64 and Windows x64; gate each selected revision on its actual successful run and verified manifests/hashes |
+| Product acceptance of the supported matrix | Coordinator/user decision remains: accept explicit unsupported outcomes and portable approximations, or identify required additional input features |
+| Durable distribution, signing/notarization and release authorization | Not implemented/authorized in this milestone; unsigned expiring CI artifacts are not a release channel |
+| Component protocol adapter | Deliberately untouched; must expose exact source selections, fallback policy, limits, exit codes and warnings without guessing/retrying fonts |
+| Historical accuracy claims | Unavailable evidence, not an implementation prerequisite for the defined subset; no classic equivalence claim |
 
 ### Next compatibility work versus external dependencies
 
 | Gap | What can proceed without a historical oracle | Evidence or decision still needed |
 | --- | --- | --- |
-| Font ingestion and FOND metrics | Reuse bounded container parsing for explicit font-resource selectors; parse documented family widths/kerning with synthetic cases | Caller-supplied fonts and correct family/face/size bindings; no automatic licensed-font acquisition |
+| Remaining family behavior | Documented synthetic-style properties and richer metadata inspection can be implemented if added to the supported contract | Negative version-0/1 values need a resolved representation contract or identified historical samples; current exact intrinsic bindings do not synthesize styles |
 | Outline fonts and encodings | Add explicitly bound sfnt outlines and a documented shaping/encoding contract using established libraries | Source encoding/script and matching licensed font files must be known, not guessed from byte strings or names |
 | Justification | Implement documented simple-script spacing once the input encoding/script contract is explicit | Script identity and representative recorded lineJustify/ChExtra cases; a raw NFNT does not identify a Script Manager environment |
 | Embedded images | Add documented QuickTime raw/RLE still codecs, affine placement and defined alpha/matte compositing with bounded fixtures | Historical codec/color-management equivalence needs known originals and a decoder environment |
 | Preserved vector coverage | Add remaining pen/shape frames using QuickDraw coverage rather than generic SVG strokes; retain explicit full-composite fallback for destination modes | Editable-vector versus screen-pixel presentation remains a fidelity choice, not something to conceal |
-| Additional containers | AppleSingle and explicit native resource-fork access can build on current extraction | Filesystem behavior and deployment policy must be tested per platform |
+| Additional containers | Explicit native resource-fork access can build on current extraction; AppleSingle v2 is implemented | Filesystem behavior and deployment policy must be tested per platform |
 | Classic fidelity | Improve specification-backed coverage and differential backend checks now | Pixel equivalence requires an identified OS/QuickDraw/device/font setup, lawful reference outputs and a representative corpus |
 
 None of those missing oracle inputs prevents further ordinary compatibility

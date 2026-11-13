@@ -114,6 +114,7 @@ fn all_container_truncations_fail_and_do_not_panic() {
         (Container::ResourceFork, rf.clone()),
         (Container::MacBinary, macbinary(&[], &rf, 129)),
         (Container::AppleDouble, appledouble(&rf)),
+        (Container::AppleSingle, applesingle(&[], &rf)),
     ] {
         for end in 0..data.len() {
             assert!(
@@ -122,6 +123,45 @@ fn all_container_truncations_fail_and_do_not_panic() {
             );
         }
     }
+}
+#[test]
+fn applesingle_shares_bounds_and_requires_explicit_fork_selection() {
+    let data = applesingle(&pict(false), &resource_fork(&[(-7, pict(true))]));
+    let inventory = list_pictures(&data, Container::Auto, &Limits::default()).unwrap();
+    assert_eq!(inventory.container, Container::AppleSingle);
+    assert_eq!(inventory.pictures.len(), 2);
+    assert_eq!(
+        parse(&data, Container::Auto, &Limits::default())
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidArguments
+    );
+    for (selector, expected) in [
+        (PictureSelector::DataFork, [255; 6]),
+        (PictureSelector::Resource(-7), [0; 6]),
+    ] {
+        let picture = parse_selected(&data, Container::Auto, selector, &Limits::default()).unwrap();
+        assert_eq!(
+            render(&picture, &RenderOptions::default())
+                .unwrap()
+                .image
+                .rgb(),
+            expected
+        );
+    }
+    for (at, value) in [(4, 0x10000u32), (38, 1), (30, 0), (34, u32::MAX), (42, 50)] {
+        let mut bad = data.clone();
+        bad[at..at + 4].copy_from_slice(&value.to_be_bytes());
+        assert!(
+            list_pictures(&bad, Container::AppleSingle, &Limits::default()).is_err(),
+            "offset {at}"
+        );
+    }
+    let mut file = vec![0; 512];
+    file.extend(pict(true));
+    let single = applesingle(&file, &[]);
+    let picture = parse(&single, Container::Auto, &Limits::default()).unwrap();
+    assert_eq!(picture.inspect().source_offset, 562);
 }
 #[test]
 fn resource_overlap_duplicates_names_and_offsets_are_validated() {

@@ -11,7 +11,9 @@ Origin changes, rounded rectangles, arcs, pixel patterns, arithmetic/highlight
 modes and one-bit NFNT text are implemented with explicit limitations. Text
 supports optional width/height tables, ratio scaling, fractional spacing and
 documented source transfer modes under an explicit portable policy.
-Resource forks, MacBinary and AppleDouble support explicit picture selection.
+Resource forks, MacBinary, AppleDouble and AppleSingle support explicit picture
+and font-resource selection. Explicit Roman FOND bindings provide exact bitmap
+associations, family fractional widths and opt-in within-run pair kerning.
 Embedded JPEG/PNG still images support bounded decoding and restricted transforms.
 Other QuickTime codecs/transforms, outline/multibyte text and several
 vector modes remain unsupported. Unsupported drawing fails instead of disappearing.
@@ -24,6 +26,7 @@ target/release/quickdraw --version
 target/release/quickdraw capabilities
 target/release/quickdraw inspect --input drawing.pict
 target/release/quickdraw list-pictures --input archive.bin
+target/release/quickdraw list-fonts --input fonts.as
 target/release/quickdraw convert --input archive.bin --resource-id 128 --output selected.png
 target/release/quickdraw convert --input drawing.pict --output drawing.png
 target/release/quickdraw convert --input drawing.pict --output drawing.svg \
@@ -68,6 +71,8 @@ font layout with raster rendering; it rejects unsupported vector operations
 instead of silently substituting pixels. `encode_pdf` and `encode_svg` embed a
 complete rendered image when the caller explicitly chooses that policy.
 `BitmapFont::parse` and `FontBook::insert` supply exact font bindings.
+`list_font_resources`, `FontFamily::parse` and `BitmapFont::from_container`
+support bounded font containers and explicit resource/family selection.
 Library API stability follows the crate's
 pre-1.0 version; the separately versioned CLI envelope is intended for
 `4D.SystemWorker`.

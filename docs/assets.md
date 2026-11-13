@@ -101,7 +101,7 @@ original PICT separately and retain warnings and content hashes with results.
 Do not infer fidelity or feature completeness from an asset being available.
 The additive protocol-1 extension exposes `--font-map` schema 1 and explicit
 SVG/PDF `preserve`/`raster` policies. Fonts are not bundled or downloaded; a caller
-must provide appropriately licensed extracted NFNT resources and preserve them
+must provide appropriately licensed bitmap font sources and preserve them
 alongside the PICT. Probe capabilities rather than assuming every font, codec or
 vector operation is supported. Use `source_revision` and archive integrity, not
 the development version string alone, to identify an exact milestone build.
@@ -111,7 +111,11 @@ JPEG encoder, Pillow, pypdf and PDFium are test-only, not external runtime
 requirements or files installed beside the binary.
 Capabilities also advertise `text_profile: portable_nfnt_v1`; extended text
 layout/compositing uses the existing explicit `--fidelity approximate` policy.
-The font-map schema and exact binding rules remain unchanged. A wrapper must
+Schema 1 now also accepts explicit `container`/`resource`/`family` selections,
+with `list-fonts` inventory and AppleSingle v2. Old raw-font maps are unchanged.
+FOND family selection requires a declared Roman script; pair kerning is an
+explicit approximate-policy opt-in, not inferred from font availability.
+A wrapper must
 surface unsupported-font/encoding errors rather than retry with guessed fonts.
 
 Archives use sorted members, a fixed 1980 timestamp, explicit Unix permissions,

@@ -1,4 +1,6 @@
 use crate::model::*;
+use crate::{FontFamily, FontResourceType, list_font_resources};
+use serde::Deserialize;
 use std::{collections::BTreeMap, sync::Arc};
 
 /// An extracted one-bit NFNT/FONT resource, not a resource-fork container.
@@ -15,6 +17,33 @@ pub struct BitmapFont {
     widths: usize,
     fractional_widths: Option<usize>,
     image_heights: Option<usize>,
+    family: Option<crate::fond::FamilyMetrics>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FontResourceSelection {
+    #[serde(rename = "type")]
+    pub resource_type: FontResourceType,
+    pub id: i16,
+}
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FontScript {
+    Roman,
+}
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FontFamilySelection {
+    pub id: i16,
+    pub script: FontScript,
+    #[serde(default)]
+    pub kerning: bool,
+}
+#[derive(Clone, Debug, Default)]
+pub struct FontSelection {
+    pub resource: Option<FontResourceSelection>,
+    pub family: Option<FontFamilySelection>,
 }
 
 fn word(data: &[u8], at: usize) -> Result<u16> {
@@ -139,10 +168,93 @@ impl BitmapFont {
             widths,
             fractional_widths,
             image_heights,
+            family: None,
         })
     }
 
-    pub(crate) fn glyph(&self, code: u8) -> Result<Glyph<'_>> {
+    pub fn from_container(
+        data: &[u8],
+        container: Container,
+        size: u16,
+        face: u8,
+        selection: &FontSelection,
+        limits: &Limits,
+    ) -> Result<Self> {
+        let invalid = |message| Error::new(ErrorCode::InvalidArguments, message);
+        if selection.resource.is_none() && selection.family.is_none() {
+            return Err(invalid(
+                "font container requires an explicit resource or family selection",
+            ));
+        }
+        if selection
+            .resource
+            .is_some_and(|s| s.resource_type == FontResourceType::Fond)
+        {
+            return Err(invalid(
+                "bitmap resource type must be NFNT or FONT; select FOND with family",
+            ));
+        }
+        let inventory = list_font_resources(data, container, limits)?;
+        let family = selection.family.map(|selected| -> Result<_> {
+            let entry = inventory.resources.iter().find(|entry|
+                entry.resource_type == FontResourceType::Fond && entry.resource_id == selected.id
+            ).ok_or_else(|| invalid("selected FOND resource is missing"))?;
+            let family = FontFamily::parse(&data[entry.offset..entry.offset + entry.length], limits)?;
+            if family.family_id != selected.id {
+                return Err(Error::new(ErrorCode::Malformed, "FOND header family ID differs from resource ID"));
+            }
+            match selected.script {
+                FontScript::Roman if (0..16384).contains(&family.family_id) => {}
+                _ => return Err(Error::new(ErrorCode::Unsupported, "only explicitly declared Roman FOND families with IDs 0..16383 are supported")),
+            }
+            Ok(family)
+        }).transpose()?;
+        let associated = family
+            .as_ref()
+            .map(|f| f.resource_id(size, face))
+            .transpose()?;
+        if let (Some(id), Some(resource)) = (associated, selection.resource)
+            && id != resource.id
+        {
+            return Err(invalid(
+                "bitmap resource ID conflicts with exact FOND association",
+            ));
+        }
+        let mut choices = inventory.resources.iter().filter(|entry| {
+            entry.resource_type != FontResourceType::Fond
+                && associated.is_none_or(|id| entry.resource_id == id)
+                && selection.resource.is_none_or(|s| {
+                    entry.resource_id == s.id && entry.resource_type == s.resource_type
+                })
+        });
+        let entry = choices
+            .next()
+            .ok_or_else(|| invalid("selected bitmap font resource is missing"))?;
+        if choices.next().is_some() {
+            return Err(invalid(
+                "ambiguous NFNT/FONT association; select resource type and ID explicitly",
+            ));
+        }
+        let mut font = Self::parse(&data[entry.offset..entry.offset + entry.length], limits)?;
+        if let (Some(family), Some(selected)) = (family, selection.family) {
+            font.family = Some(family.metrics(
+                size,
+                face,
+                selected.kerning,
+                font.fractional_widths.is_none(),
+            )?);
+        }
+        Ok(font)
+    }
+
+    pub(crate) fn kerning_enabled(&self) -> bool {
+        self.family.as_ref().is_some_and(|f| f.kerning_enabled)
+    }
+    pub(crate) fn kern(&self, first: u8, second: u8) -> i64 {
+        self.family.as_ref().map_or(0, |f| f.kern(first, second))
+    }
+
+    pub(crate) fn glyph(&self, code: u8, fractional: bool) -> Result<Glyph<'_>> {
         if u16::from(code) < self.first || u16::from(code) > self.last {
             return Err(Error::new(
                 ErrorCode::Unsupported,
@@ -166,6 +278,14 @@ impl BitmapFont {
             }
             None => 0..self.height,
         };
+        let fractional_advance = self
+            .fractional_widths
+            .map(|table| word(&self.data, table + index * 2).map(|v| i64::from(v) * 256))
+            .transpose()?;
+        let fractional_advance = match (fractional_advance, &self.family) {
+            (None, Some(family)) if fractional => family.advance(code)?,
+            (value, _) => value,
+        };
         Ok(Glyph {
             font: self,
             left,
@@ -173,10 +293,7 @@ impl BitmapFont {
             height: self.height,
             bearing: self.kern + (metrics >> 8) as i32,
             advance: (metrics & 255) as i32,
-            fractional_advance: self
-                .fractional_widths
-                .map(|table| word(&self.data, table + index * 2).map(|v| i64::from(v) * 256))
-                .transpose()?,
+            fractional_advance,
             ascent: self.ascent,
             rows,
         })
@@ -220,6 +337,16 @@ impl FontBook {
         font: BitmapFont,
         limits: &Limits,
     ) -> Result<()> {
+        if font
+            .family
+            .as_ref()
+            .is_some_and(|f| f.size != size || f.face != face)
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArguments,
+                "binding size/style conflicts with selected FOND strike",
+            ));
+        }
         if self.fonts.contains_key(&(id, size, face)) {
             return Err(Error::new(
                 ErrorCode::InvalidArguments,
@@ -230,6 +357,7 @@ impl FontBook {
         let bytes = self
             .bytes
             .checked_add(font.data.len())
+            .and_then(|n| n.checked_add(font.family.as_ref().map_or(0, |f| f.byte_cost)))
             .filter(|&n| n <= limits.max_decoded_bytes)
             .ok_or_else(|| {
                 Error::new(

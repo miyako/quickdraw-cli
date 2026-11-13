@@ -204,6 +204,69 @@ pub fn appledouble(resource: &[u8]) -> Vec<u8> {
     bytes
 }
 
+pub fn applesingle(data: &[u8], resource: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![0, 5, 0x16, 0, 0, 2, 0, 0];
+    bytes.extend([0; 16]);
+    bytes.extend(word(2));
+    for n in [1, 50, data.len(), 2, 50 + data.len(), resource.len()] {
+        bytes.extend_from_slice(&(n as u32).to_be_bytes());
+    }
+    bytes.extend_from_slice(data);
+    bytes.extend_from_slice(resource);
+    bytes
+}
+
+pub fn font_resources(records: &[([u8; 4], i16, Vec<u8>)]) -> Vec<u8> {
+    let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+    let mut payload = Vec::new();
+    for (kind, id, bytes) in records {
+        groups.entry(*kind).or_default().push((*id, payload.len()));
+        payload.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        payload.extend_from_slice(bytes);
+    }
+    let refs = 30 + groups.len() * 8;
+    let names = refs + records.len() * 12;
+    let mut map = vec![0; names];
+    map[24..26].copy_from_slice(&28u16.to_be_bytes());
+    map[26..28].copy_from_slice(&(names as u16).to_be_bytes());
+    map[28..30].copy_from_slice(&(groups.len() as u16).wrapping_sub(1).to_be_bytes());
+    let mut reference = refs;
+    for (index, (kind, entries)) in groups.iter().enumerate() {
+        let at = 30 + index * 8;
+        map[at..at + 4].copy_from_slice(kind);
+        map[at + 4..at + 6].copy_from_slice(&(entries.len() as u16 - 1).to_be_bytes());
+        map[at + 6..at + 8].copy_from_slice(&((reference - 28) as u16).to_be_bytes());
+        for (id, offset) in entries {
+            map[reference..reference + 2].copy_from_slice(&id.to_be_bytes());
+            map[reference + 2..reference + 4].copy_from_slice(&0xffffu16.to_be_bytes());
+            map[reference + 5..reference + 8].copy_from_slice(&(*offset as u32).to_be_bytes()[1..]);
+            reference += 12;
+        }
+    }
+    let mut header = Vec::new();
+    for n in [256, 256 + payload.len(), payload.len(), map.len()] {
+        header.extend_from_slice(&(n as u32).to_be_bytes());
+    }
+    map[..16].copy_from_slice(&header);
+    header.resize(256, 0);
+    header.extend(payload);
+    header.extend(map);
+    header
+}
+
+// Original 52-byte FamRec, one intrinsic strike and Adobe TN 0091 width/kern tables.
+pub fn fond() -> Vec<u8> {
+    let mut bytes = words(&[2, 7, 65, 66, 4096, 0, 0, 4096]);
+    for at in [60u32, 72, 0] {
+        bytes.extend(at.to_be_bytes());
+    }
+    bytes.extend([0; 22]);
+    bytes.extend(words(&[3, 0, 3, 0, -128])); // version 3, one association
+    bytes.extend(words(&[0, 0, 3072, 4096, 2048, 0])); // A=2.25, B=3 pixels at 3pt
+    bytes.extend(words(&[0, 0, 1, 0x4142, -1024])); // AB=-0.75 pixel at 3pt
+    bytes
+}
+
 pub fn quicktime(
     codec: &[u8; 4],
     width: u16,

@@ -1,6 +1,6 @@
 use crate::model::*;
 use crate::parser::{parse_payload, signature};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, ops::Range};
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -23,6 +23,34 @@ pub struct PictureEntry {
 pub struct ContainerInventory {
     pub container: Container,
     pub pictures: Vec<PictureEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum FontResourceType {
+    #[serde(rename = "NFNT")]
+    Nfnt,
+    #[serde(rename = "FONT")]
+    Font,
+    #[serde(rename = "FOND")]
+    Fond,
+}
+#[derive(Debug, Serialize)]
+pub struct FontResourceEntry {
+    pub resource_type: FontResourceType,
+    pub resource_id: i16,
+    pub name_hex: Option<String>,
+    pub offset: usize,
+    pub length: usize,
+}
+#[derive(Debug, Serialize)]
+pub struct FontInventory {
+    pub container: Container,
+    pub resources: Vec<FontResourceEntry>,
+}
+#[derive(Default)]
+struct Entries {
+    pictures: Vec<PictureEntry>,
+    fonts: Vec<FontResourceEntry>,
 }
 
 fn bad(message: &str) -> Error {
@@ -66,7 +94,7 @@ fn count(n: usize, limits: &Limits, budget: &mut Budget<'_>) -> Result<()> {
     }
     budget.work(n as u64)?;
     budget.allocate(
-        n.checked_mul(128)
+        n.checked_mul(256)
             .ok_or_else(|| bad("entry count overflow"))?,
     )
 }
@@ -79,7 +107,7 @@ fn resources(
     base: usize,
     limits: &Limits,
     budget: &mut Budget<'_>,
-    entries: &mut Vec<PictureEntry>,
+    entries: &mut Entries,
 ) -> Result<()> {
     let data_range = span(data, u32be(data, 0)?, u32be(data, 8)?)?;
     let map_range = span(data, u32be(data, 4)?, u32be(data, 12)?)?;
@@ -167,9 +195,22 @@ fn resources(
             }
             payloads.push(range);
             if kind == b"PICT" {
-                entries.push(PictureEntry {
+                entries.pictures.push(PictureEntry {
                     source: "resource",
                     resource_id: Some(id),
+                    name_hex,
+                    offset: base + payload + 4,
+                    length: len,
+                });
+            } else if let Some(resource_type) = match kind {
+                b"NFNT" => Some(FontResourceType::Nfnt),
+                b"FONT" => Some(FontResourceType::Font),
+                b"FOND" => Some(FontResourceType::Fond),
+                _ => None,
+            } {
+                entries.fonts.push(FontResourceEntry {
+                    resource_type,
+                    resource_id: id,
                     name_hex,
                     offset: base + payload + 4,
                     length: len,
@@ -183,17 +224,17 @@ fn resources(
     Ok(())
 }
 
-fn data_fork(data: &[u8], base: usize, entries: &mut Vec<PictureEntry>) -> Result<()> {
+fn data_fork(data: &[u8], base: usize, entries: &mut Entries) -> Result<()> {
     match (signature(data, 0), signature(data, 512)) {
         (true, true) => return Err(bad("ambiguous raw/headered picture in data fork")),
-        (true, false) => entries.push(PictureEntry {
+        (true, false) => entries.pictures.push(PictureEntry {
             source: "data_fork",
             resource_id: None,
             name_hex: None,
             offset: base,
             length: data.len(),
         }),
-        (false, true) => entries.push(PictureEntry {
+        (false, true) => entries.pictures.push(PictureEntry {
             source: "data_fork",
             resource_id: None,
             name_hex: None,
@@ -235,7 +276,7 @@ fn macbinary(
     data: &[u8],
     limits: &Limits,
     budget: &mut Budget<'_>,
-    entries: &mut Vec<PictureEntry>,
+    entries: &mut Entries,
 ) -> Result<()> {
     if !mac_signature(data) {
         return Err(bad("invalid MacBinary header"));
@@ -305,19 +346,20 @@ fn macbinary(
     }
     Ok(())
 }
-fn appledouble(
+fn apple_file(
     data: &[u8],
     limits: &Limits,
     budget: &mut Budget<'_>,
-    entries: &mut Vec<PictureEntry>,
+    entries: &mut Entries,
+    single: bool,
 ) -> Result<()> {
-    if u32be(data, 0)? != 0x00051607 {
-        return Err(bad("invalid AppleDouble magic"));
+    if u32be(data, 0)? != if single { 0x00051600 } else { 0x00051607 } {
+        return Err(bad("invalid AppleSingle/AppleDouble magic"));
     }
     if u32be(data, 4)? != 0x00020000 {
         return Err(Error::new(
             ErrorCode::Unsupported,
-            "only AppleDouble version 2 is supported",
+            "only AppleSingle/AppleDouble version 2 is supported",
         ));
     }
     let n = u16be(data, 24)? as usize;
@@ -328,9 +370,9 @@ fn appledouble(
         let at = 26 + i * 12;
         let id = u32be(data, at)?;
         if id == 0 || !ids.insert(id) {
-            return Err(bad("invalid or duplicate AppleDouble entry ID"));
+            return Err(bad("invalid or duplicate AppleSingle/AppleDouble entry ID"));
         }
-        if id == 1 {
+        if id == 1 && !single {
             return Err(bad("AppleDouble must not contain a data fork entry"));
         }
         let range = span(data, u32be(data, at + 4)?, u32be(data, at + 8)?)?;
@@ -340,6 +382,8 @@ fn appledouble(
         layout.push(range.clone());
         if id == 2 {
             resources(&data[range.clone()], range.start, limits, budget, entries)?;
+        } else if id == 1 {
+            data_fork(&data[range.clone()], range.start, entries)?;
         }
     }
     disjoint(&mut layout)
@@ -357,11 +401,7 @@ fn looks_like_resources(data: &[u8]) -> bool {
 }
 
 /// Inspect container ranges without decoding pictures or extracting files to disk.
-pub fn list_pictures(
-    data: &[u8],
-    container: Container,
-    limits: &Limits,
-) -> Result<ContainerInventory> {
+fn scan(data: &[u8], container: Container, limits: &Limits) -> Result<(Container, Entries)> {
     limits.validate()?;
     if data.len() > limits.max_input_bytes {
         return Err(Error::new(
@@ -378,6 +418,7 @@ pub fn list_pictures(
             (looks_like_resources(data), Container::ResourceFork),
             (mac_signature(data), Container::MacBinary),
             (data.starts_with(&[0, 5, 0x16, 7]), Container::AppleDouble),
+            (data.starts_with(&[0, 5, 0x16, 0]), Container::AppleSingle),
         ]
         .into_iter()
         .filter_map(|(yes, kind)| yes.then_some(kind))
@@ -391,7 +432,7 @@ pub fn list_pictures(
     } else {
         container
     };
-    let mut pictures = Vec::new();
+    let mut entries = Entries::default();
     match container {
         Container::Raw | Container::File => {
             let offset = if container == Container::File { 512 } else { 0 };
@@ -399,7 +440,7 @@ pub fn list_pictures(
                 .len()
                 .checked_sub(offset)
                 .ok_or_else(|| bad("missing PICT file header"))?;
-            pictures.push(PictureEntry {
+            entries.pictures.push(PictureEntry {
                 source: "data_fork",
                 resource_id: None,
                 name_hex: None,
@@ -407,14 +448,43 @@ pub fn list_pictures(
                 length: len,
             });
         }
-        Container::ResourceFork => resources(data, 0, limits, &mut budget, &mut pictures)?,
-        Container::MacBinary => macbinary(data, limits, &mut budget, &mut pictures)?,
-        Container::AppleDouble => appledouble(data, limits, &mut budget, &mut pictures)?,
+        Container::ResourceFork => resources(data, 0, limits, &mut budget, &mut entries)?,
+        Container::MacBinary => macbinary(data, limits, &mut budget, &mut entries)?,
+        Container::AppleDouble => apple_file(data, limits, &mut budget, &mut entries, false)?,
+        Container::AppleSingle => apple_file(data, limits, &mut budget, &mut entries, true)?,
         Container::Auto => unreachable!(),
     }
+    Ok((container, entries))
+}
+
+pub fn list_pictures(
+    data: &[u8],
+    container: Container,
+    limits: &Limits,
+) -> Result<ContainerInventory> {
+    let (container, entries) = scan(data, container, limits)?;
     Ok(ContainerInventory {
         container,
-        pictures,
+        pictures: entries.pictures,
+    })
+}
+
+/// Inventory font resources without decoding them or treating names as paths.
+pub fn list_font_resources(
+    data: &[u8],
+    container: Container,
+    limits: &Limits,
+) -> Result<FontInventory> {
+    let (container, entries) = scan(data, container, limits)?;
+    if matches!(container, Container::Raw | Container::File) {
+        return Err(Error::new(
+            ErrorCode::InvalidArguments,
+            "font resource selection requires a resource container",
+        ));
+    }
+    Ok(FontInventory {
+        container,
+        resources: entries.fonts,
     })
 }
 

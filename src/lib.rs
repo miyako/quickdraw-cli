@@ -4,6 +4,7 @@
 //! Parsing is independent of rendering; unsupported drawing is never silently lost.
 mod codec;
 mod container;
+mod fond;
 mod font;
 mod model;
 mod output;
@@ -12,9 +13,13 @@ mod raster;
 mod vector;
 
 pub use container::{
-    ContainerInventory, PictureEntry, PictureSelector, list_pictures, parse_selected,
+    ContainerInventory, FontInventory, FontResourceEntry, FontResourceType, PictureEntry,
+    PictureSelector, list_font_resources, list_pictures, parse_selected,
 };
-pub use font::{BitmapFont, FontBook};
+pub use fond::FontFamily;
+pub use font::{
+    BitmapFont, FontBook, FontFamilySelection, FontResourceSelection, FontScript, FontSelection,
+};
 pub use model::{
     Container, Diagnostic, Error, ErrorCode, Fidelity, Inspection, Limits, Picture, Rect, Result,
 };

@@ -190,6 +190,41 @@ class Documents(unittest.TestCase):
                (5,words(2)),(0x28,words(3,0)+bytes([2])+b"AB")]
         self.compare_pdf_with_raster(ops,extra=extra,policy="raster")
 
+    def test_applesingle_fond_fractional_widths_and_opt_in_kerning_match_pdfium(self):
+        font = words(0x1000,65,66,4,0,0,3,3,12,3,0,0,1)
+        font += bytes([0x5c,0,0xb4,0,0xfc,0]) + words(0,3,5,6) + words(4,0x0103,2,-1)
+        family = words(2,7,65,66,4096,0,0,4096) + struct.pack(">III",60,72,0)
+        family += bytes(22) + words(3,0,3,0,-128)
+        family += words(0,0,3072,4096,2048,0, 0,0,1,0x4142,-1024)
+        payload = struct.pack(">I",len(family)) + family + struct.pack(">I",len(font)) + font
+        resource_map = bytearray(70)
+        resource_map[24:30] = words(28,70,1)
+        resource_map[30:46] = b"FOND" + words(0,18) + b"NFNT" + words(0,30)
+        for at, resource_id, offset in [(46,7,0),(58,-128,4+len(family))]:
+            resource_map[at:at+4] = words(resource_id,-1)
+            resource_map[at+5:at+8] = offset.to_bytes(3,"big")
+        header = struct.pack(">IIII",256,256+len(payload),len(payload),len(resource_map))
+        resource_map[:16] = header
+        fork = header + bytes(240) + payload + resource_map
+        single = struct.pack(">II",0x00051600,0x00020000) + bytes(16) + words(1)
+        single += struct.pack(">III",2,38,len(fork)) + fork
+        (self.root/"fonts.as").write_bytes(single)
+        mapping = self.root/"fonts.json"
+        extra = ("--font-map",str(mapping),"--fidelity","approximate")
+        for kerning in (False, True):
+            mapping.write_text(json.dumps({"schema":1,"fonts":[{
+                "id":7,"size":3,"path":"fonts.as","container":"auto",
+                "family":{"id":7,"script":"roman","kerning":kerning}}]}))
+            for mode in (0,64):
+                with self.subTest(kerning=kerning,mode=mode):
+                    ops = [(3,words(7)),(0x0d,words(3)),(0x2e,words(4)+bytes([0,0,1,0])),
+                           (0x10,words(1,2,1,1)),(0x0c,words(2,1)),(1,words(10,0,1,8,15)),
+                           (5,words(mode)),(0x28,words(4,1)+bytes([3])+b"ABA"),(0x21,words(4,15))]
+                    self.compare_pdf_with_raster(ops,extra=extra)
+                    result, target = self.convert("svg",operations=ops,extra=extra)
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertEqual(len(ET.parse(target).findall(".//{http://www.w3.org/2000/svg}image")),0)
+
 
 if __name__ == "__main__":
     unittest.main()

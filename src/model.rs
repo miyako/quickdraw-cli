@@ -91,7 +91,7 @@ impl Diagnostic {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize, PartialEq, Eq, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Container {
     Auto,
@@ -105,6 +105,9 @@ pub enum Container {
     #[value(name = "appledouble")]
     #[serde(rename = "appledouble")]
     AppleDouble,
+    #[value(name = "applesingle")]
+    #[serde(rename = "applesingle")]
+    AppleSingle,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, clap::ValueEnum)]
