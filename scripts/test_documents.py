@@ -1,6 +1,7 @@
 """Independently parse our generated documents, not a classic QuickDraw oracle."""
 import json
 import io
+from fractions import Fraction
 from contextlib import closing
 import os
 from pathlib import Path
@@ -35,16 +36,16 @@ def picture(operations, frame=(0, 0, 10, 20)):
     return data
 
 
-def quicktime(codec, width, height, depth, encoded, matrix=None, mode=0, mask=b"", palette=b""):
+def quicktime(codec, width, height, depth, encoded, matrix=None, mode=0, mask=b"", palette=b"", extensions=b""):
     matrix = matrix or [65536,0,0, 0,65536,0, 0,0,1<<30]
     payload = words(0) + struct.pack(">9i", *matrix) + bytes(12) + words(mode)
     payload += words(0,0,height,width) + bytes(4) + struct.pack(">I",len(mask)) + mask
     description = bytearray(86)
-    struct.pack_into(">I4s", description, 0, 86 + len(palette), codec)
+    struct.pack_into(">I4s", description, 0, 86 + len(palette) + len(extensions), codec)
     struct.pack_into(">HH", description, 32, width, height)
     struct.pack_into(">IH", description, 44, len(encoded), 1)
     struct.pack_into(">Hh", description, 82, depth, 0 if palette else -1)
-    payload += description + palette + encoded
+    payload += description + palette + extensions + encoded
     return struct.pack(">I",len(payload)) + payload
 
 
@@ -140,7 +141,8 @@ class Documents(unittest.TestCase):
                 width,height = case["width"],case["height"]
                 args=(case["codec"].encode(),width,height,case["depth"],bytes.fromhex(case["packet"]))
                 palette=bytes.fromhex(case["palette"])
-                result,target=self.convert("png",operations=[(0x8200,quicktime(*args,palette=palette))],frame=(0,0,height,width))
+                extensions=bytes.fromhex(case.get("extensions",""))
+                result,target=self.convert("png",operations=[(0x8200,quicktime(*args,palette=palette,extensions=extensions))],frame=(0,0,height,width))
                 self.assertEqual(result.returncode,0,result.stderr)
                 with Image.open(target) as image:
                     self.assertEqual(image.convert("RGB").tobytes(),bytes.fromhex(case["rgb"]))
@@ -148,12 +150,44 @@ class Documents(unittest.TestCase):
                     continue
                 mask=words(0,1,width-1,32767,height,1,width-1,32767,32767)
                 operations=[(0x31,words(0,0,12,40)),(0x0c,words(1,1)),(1,words(10,1,3,11,38)),
-                            (0x8200,quicktime(*args,palette=palette,mask=mask,
+                            (0x8200,quicktime(*args,palette=palette,extensions=extensions,mask=mask,
                                 matrix=[-65536,16384,0,32768,65536,0,34*65536,32768,1<<30]))]
                 self.compare_pdf_with_raster(operations,frame=(0,0,12,40),extra=("--fidelity","approximate"))
                 result,target=self.convert("svg",operations=operations,frame=(0,0,12,40),extra=("--fidelity","approximate"))
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertEqual(len(ET.parse(target).findall(".//{http://www.w3.org/2000/svg}image")),1)
+
+    def test_image_opcolor_blend_matches_rational_reference_and_whole_composite_fallback(self):
+        backdrop=(20,80,140)
+        colors=[(250,90,10),(0,255,80),(100,50,240),(170,210,35),(1,2,3),(255,255,255)]
+        for mode in [32,260]:
+            for weight in [0,1,32768,65534,65535]:
+                with self.subTest(mode=mode,weight=weight):
+                    weights=(weight,65535-weight,32768)
+                    alphas=[255]*6 if mode==32 else [0,1,127,128,254,255]
+                    encoded=bytes(v for a,rgb in zip(alphas,colors) for v in (a,*rgb))
+                    settings=[(0x1a,struct.pack(">3H",*(v*257 for v in backdrop))),(0x31,words(0,0,1,6)),
+                              (0x1f,struct.pack(">3H",*weights))]
+                    operations=settings+[(0x8200,quicktime(b"raw ",6,1,32,encoded,mode=mode))]
+                    result,target=self.convert("png",operations=operations,frame=(0,0,1,6),extra=("--fidelity","approximate"))
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    expected=[]
+                    for a,rgb in zip(alphas,colors):
+                        for s,d,w in zip(rgb,backdrop,weights):
+                            opacity=Fraction(w,65535)*(Fraction(a,255) if mode==260 else 1)
+                            channel=s*opacity+d*(1-opacity)
+                            rounded=channel+(Fraction(1,2) if mode==260 else 0)
+                            expected.append(rounded.numerator//rounded.denominator)
+                    with Image.open(target) as image:
+                        self.assertEqual(image.convert("RGB").tobytes(),bytes(expected))
+                    result,_=self.convert("svg",operations=operations,frame=(0,0,1,6),extra=("--fidelity","approximate"))
+                    self.assertEqual(result.returncode,5,result.stderr)
+            mask=words(0,0,5,32767,1,0,5,32767,32767)
+            operations=[(0x1a,struct.pack(">3H",*(v*257 for v in backdrop))),(0x31,words(0,0,4,9)),
+                        (0x1f,struct.pack(">3H",12345,34567,54321)),(0x0c,words(1,0)),(1,words(10,0,1,4,6)),
+                        (0x8200,quicktime(b"raw ",6,1,32,encoded,mode=mode,mask=mask,
+                            matrix=[65536,0,0,0,65536,0,2*65536,65536,1<<30]))]
+            self.compare_pdf_with_raster(operations,frame=(0,0,4,9),extra=("--fidelity","approximate"),policy="raster")
 
     def convert(self, extension, policy="preserve", operations=None, extra=(), frame=(0,0,10,20)):
         source, target = self.root / "input.pict", self.root / f"output.{extension}"

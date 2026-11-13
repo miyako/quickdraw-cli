@@ -309,6 +309,7 @@ pub(crate) struct Bitmap {
     pub raw_copy: bool,
     pub affine: Option<Affine>,
     pub alpha: Option<Vec<u8>>,
+    pub description_extensions: Option<(usize, Vec<u8>)>,
 }
 
 /// QuickTime row-vector affine matrix, retaining 16.16 integers.
@@ -490,6 +491,14 @@ pub struct InspectedOperation {
     pub comment_kind: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_description_extensions: Option<InspectedDescriptionExtensions>,
+}
+
+#[derive(Serialize)]
+pub struct InspectedDescriptionExtensions {
+    pub offset: usize,
+    pub data_hex: String,
 }
 
 #[derive(Serialize)]
@@ -545,6 +554,7 @@ impl Picture {
                         kind: "state",
                         comment_kind: None,
                         data_hex: None,
+                        image_description_extensions: None,
                     };
                     match &op.command {
                         Command::Comment { kind, data } => {
@@ -569,7 +579,16 @@ impl Picture {
                             info.data_hex = Some(hex(data));
                         }
                         Command::Draw(_, _) => info.kind = "shape",
-                        Command::Bitmap(_) => info.kind = "bitmap",
+                        Command::Bitmap(bitmap) => {
+                            info.kind = "bitmap";
+                            info.image_description_extensions = bitmap
+                                .description_extensions
+                                .as_ref()
+                                .map(|(offset, data)| InspectedDescriptionExtensions {
+                                    offset: *offset,
+                                    data_hex: hex(data),
+                                });
+                        }
                         Command::Line(_, _) | Command::LineFrom(_) | Command::ShortLineFrom(_) => {
                             info.kind = "line"
                         }

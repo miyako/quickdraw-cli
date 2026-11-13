@@ -85,6 +85,8 @@ fn independently_encoded_stills_match_ffmpeg_decoded_pixels() {
                 &unhex(case["packet"].as_str().unwrap()),
                 &unhex(case["palette"].as_str().unwrap()),
             );
+            let data =
+                description_extensions(data, &unhex(case["extensions"].as_str().unwrap_or("")));
             let rgb = decode(&data, width as i16, height as i16, Limits::default()).unwrap();
             assert_eq!(
                 rgb,

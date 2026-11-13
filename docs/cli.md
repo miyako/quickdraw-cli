@@ -408,7 +408,8 @@ Compressed QuickTime opcode `8200` supports `jpeg`, `png `, `raw `, `rle `,
 raw/Animation and block-codec readers are bounded implementations of published
 formats. Records require version 0, an 86-byte base image description, one frame,
 and no separate matte or external palette. An explicitly embedded indexed
-raw/Animation/SMC color table may extend that description. Dimensions must match codec headers where
+raw/Animation/SMC color table and the validated neutral extensions below may extend
+that description. Dimensions must match codec headers where
 the codec supplies them; block codecs use the description's dimensions.
 
 | Codec | Supported payload |
@@ -442,7 +443,13 @@ Other terminator flags, extra rows and trailing bytes fail. This explicit
 interoperability profile is backed by independently decoded fixtures and the
 FFmpeg monochrome control description, not a recovered Apple codec oracle.
 
-Raw/Animation grayscale description depths 33/34/36/40, implicit palettes,
+Raw/Animation description depths **34/36/40** explicitly select 2/4/8-bit
+grayscale with the same packed layouts. The profile is a linear white-to-black
+ramp: sample zero is white, maximum is black, intermediate output is
+`255 - sample * 255 / ((1 << bits) - 1)` in each RGB channel. These bit depths
+divide 255 exactly; no color conversion or guessed palette is involved. They
+require table ID -1 and cannot be combined with an embedded/resource palette.
+Depth 33 (not listed by the cited Apple depth contract), implicit color palettes,
 planar raw layouts and temporal frames remain unsupported. Run-command count,
 decoded bytes, pixels, padded-group expansion and work are bounded.
 
@@ -472,10 +479,33 @@ references are malformed. Other flags, nonzero reserved entry values, default
 table ID -1, external/resource IDs and description extensions are unsupported;
 there is no assumed system palette or inferred transparency.
 
+Description suffixes follow the palette, if any. The supported framing is a
+sequence of 32-bit-size/type atoms, each contained entirely in the declared
+description, optionally followed by **exactly one final four-byte zero**.
+There is no alignment padding between atoms. Truncation, overrun, duplicate
+semantic atoms, invalid sizes/rationals or bytes after the terminator fail.
+64-bit extended-size framing is checked for bounded extent but remains unsupported.
+
+| Extension | Accepted neutral profile | Rejected rendering-affecting variants |
+| --- | --- | --- |
+| `fiel` | Exactly two bytes, field count 1 / detail 0 (progressive) | Interlacing, field ordering and other values |
+| `pasp` | Exactly two positive unsigned 32-bit spacings with equal ratio (square pixels) | Non-square pixels; zero spacing is malformed |
+| `clap` | Exactly eight signed 32-bit rational components; full stored width/height and zero center offsets; equivalent signed ratios normalize exactly | Cropped/offset aperture; zero denominator or nonpositive extent is malformed |
+| Other atoms | None silently skipped | `gama`, `colr`, codec configuration and unknown semantic atoms fail; metadata-stream-only definitions such as `btrt` are not assumed valid video extensions |
+
+Neutral hints and terminator bytes do not modify pixels, but are not discarded:
+`inspect` bitmap operations add optional
+`image_description_extensions: {"offset": absolute_byte_offset, "data_hex": "..."}`
+and conversion emits `image_description_extensions`. The bytes are retained
+under the decoded-byte budget, and atom count/work are bounded. Gamma, color
+management, aperture mapping and pixel-aspect presentation are not inferred
+from a successful still decode.
+
 Indexed raw/Animation and RPZA/SMC produce opaque RGB and therefore support recorded srcCopy, not alpha
 transfer modes. They use the existing shared affine sampling, source mask,
 destination clip/origin and preserved-vector image placement. Existing
-Direct-color and JPEG/PNG behavior is unchanged; indexed and block codecs do not supply alpha.
+They also support recorded image blend mode 32 with explicit OpColor. Direct-color
+and JPEG/PNG behavior is unchanged; indexed and block codecs do not supply alpha.
 
 Nonsingular 16.16 affine matrices support rotation, reflection, shear and
 fractional edges/translations under `--fidelity approximate`. Projective entries
@@ -495,6 +525,8 @@ This compatibility distinction is advertised, not a historical filter claim.
 | 256, straight alpha | Blend source RGB and existing destination by the explicit alpha channel |
 | 257, premultiplied white | Remove the recorded white-background contribution, then composite against existing destination |
 | 258, premultiplied black | Add the existing destination contribution to the premultiplied source |
+| 32, blend | Per-channel source weight from explicit recorded OpColor; opaque images only |
+| 260, straight alpha blend | Per-channel product of explicit OpColor weight and source alpha |
 
 All alpha modes require an explicit channel and `--fidelity approximate`.
 Premultiplied modes require ARGB raw/Animation; PNG alpha is unassociated and
@@ -505,10 +537,23 @@ mode 258 uses `source*255` for its source term; mode 257 uses
 `(source-(255-alpha))*255`. Integer division is applied after summation.
 This acts against all preceding drawing, never an empty substitute background.
 
+Modes 32 and 260 require recorded `OpColor` (`001F`) and approximate fidelity,
+even if clipping results in no covered pixels. There is no assumed blend level.
+Mode 32 reuses the existing QuickDraw component blend:
+`floor((source*weight + dest*(65535-weight))/65535)`.
+For mode 260, `coverage = alpha*weight` and `denominator = 255*65535`;
+output is `(source*coverage + dest*(denominator-coverage) + denominator/2)/denominator`,
+integer-rounded once after summation. It does not prematurely reduce OpColor or
+the combined opacity to eight bits. Per-channel weights are independent. These
+are explicit portable quantization rules, not a claim about historical ICM rounding.
+Mode 32 rejects nonopaque alpha rather than discarding it; mode 260 requires
+an explicit straight alpha channel. Transparency-key mode 36 is still unsupported
+for QuickTime images; it is not confused with CopyBits background keying.
+
 Preserved SVG/PDF shares the exact placement and source-mask sampler. Straight
 alpha becomes PNG alpha/PDF soft masks on just the image layer; other geometry
 stays vector. Native-size pixels are baked into that layer, not emitted as a
-continuously transformed original image. Premultiplied modes require explicit
+continuously transformed original image. Premultiplied and OpColor blend modes require explicit
 whole-picture `--vector-policy raster`, avoiding lossy unpremultiplication or
 incorrect transparent overlays. PDF viewers can differ by channel rounding
 for partial alpha; that is not a classic QuickDraw fidelity claim.
@@ -520,8 +565,8 @@ layout, coordinate mapping and interaction with the selected transfer mode;
 implementation needs that documentation or a provenance-backed example and
 expected result. No sample-independent polarity/layout guess is made.
 
-Other transfer modes (including alpha blend with OpColor), projective matrices,
-image-description extensions, planar/paletted raw formats, additional codecs
+Other transfer modes, projective matrices, rendering-affecting/unknown
+image-description extensions, planar raw formats, additional codecs
 and opcode `8201` remain unsupported. There is no runtime QuickTime, external
 decoder process, network lookup, codec guessing or color-profile conversion.
 Decoder-internal work is not a wall-clock guarantee; retain an external timeout

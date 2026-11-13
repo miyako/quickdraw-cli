@@ -18,6 +18,9 @@ Embedded JPEG/PNG, direct-color and explicitly paletted 1/2/4/8-bit raw/Animatio
 Graphics (SMC with an explicit embedded palette) still images support bounded
 decoding without temporal-frame guesses. Nonsingular affine placement and recorded straight/premultiplied alpha
 use an explicit portable policy. Separate matte payloads remain unsupported.
+Raw/Animation also support declared white-zero grayscale depths. Neutral image
+description hints are validated and retained; OpColor blending requires an
+explicit weight and whole-picture vector fallback.
 Diagonal pens and polygon/arc/complex-region frames can export shared pixel-run paths.
 Explicit portable MacRoman text can use caller-supplied static TrueType sfnt/TTC
 faces with deterministic shaping and genuine SVG/PDF glyph paths. Classic

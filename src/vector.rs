@@ -680,13 +680,19 @@ pub fn export_vector(
                 }
                 Command::Bitmap(bitmap) => {
                     if bitmap.raw_copy {
-                        crate::raster::image_policy(bitmap, options, &mut diagnostics, op.offset)?;
+                        crate::raster::image_policy(
+                            bitmap,
+                            &state,
+                            options,
+                            &mut diagnostics,
+                            op.offset,
+                        )?;
                     }
                     if !(matches!(bitmap.mode, 0 | 4 | 36)
                         || (bitmap.raw_copy && bitmap.mode == 256))
                     {
                         return Err(unsupported(
-                            "preserved bitmap requires copy/transparent or straight alpha; premultiplied alpha requires explicit whole-picture raster",
+                            "preserved bitmap requires copy/transparent or straight alpha; premultiplied alpha and image OpColor blending require explicit whole-picture raster",
                         ));
                     }
                     if bitmap.mode == 4 && matches!(bitmap.pixels, Pixels::Rgb(_)) {

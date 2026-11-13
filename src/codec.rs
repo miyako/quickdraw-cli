@@ -128,13 +128,15 @@ fn direct(
     palette: Option<&Palette>,
     budget: &mut Budget<'_>,
 ) -> Result<Decoded> {
+    let grayscale = matches!(depth, 34 | 36 | 40);
+    let depth = if grayscale { depth - 32 } else { depth };
     if !matches!(depth, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
         return Err(unsupported(
             "QuickTime raw/Animation depth is outside the supported indexed/direct profile",
         ));
     }
     let indexed = depth <= 8;
-    if indexed && palette.is_none() {
+    if indexed && !grayscale && palette.is_none() {
         return Err(unsupported(
             "indexed QuickTime requires supplied palette entries",
         ));
@@ -165,12 +167,15 @@ fn direct(
                 (bytes[bit / 8] >> (8 - usize::from(depth) - bit % 8))
                     & ((1u16 << depth) - 1) as u8,
             );
-            (
+            let rgb = if grayscale {
+                let gray = 255 - (color * 255 / ((1usize << depth) - 1)) as u8;
+                [gray; 3]
+            } else {
                 palette.expect("palette checked")[color].ok_or_else(|| {
                     malformed("indexed QuickTime pixel references absent palette entry")
-                })?,
-                255,
-            )
+                })?
+            };
+            (rgb, 255)
         } else {
             direct_pixel(bytes, depth, codec == b"raw ")?
         };

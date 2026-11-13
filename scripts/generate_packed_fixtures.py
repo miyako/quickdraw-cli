@@ -41,14 +41,14 @@ def pack(indices, depth):
     return bytes(result)
 
 
-def movie(template, codec, width, height, depth, table, packet):
+def movie(template, codec, width, height, depth, table, packet, extensions=b""):
     description = bytearray(86)
-    struct.pack_into(">I4s", description, 0, 86 + len(table), codec.encode())
+    struct.pack_into(">I4s", description, 0, 86 + len(table) + len(extensions), codec.encode())
     struct.pack_into(">H", description, 14, 1)
     struct.pack_into(">HHII", description, 32, width, height, 72 << 16, 72 << 16)
     struct.pack_into(">IH", description, 44, len(packet), 1)
-    struct.pack_into(">HH", description, 82, depth, 0)
-    description += table
+    struct.pack_into(">Hh", description, 82, depth, 0 if table else -1)
+    description += table + extensions
     def rewrite(data):
         result = b""
         for tag, body in atoms(data):
@@ -72,11 +72,18 @@ def generate():
     cases = []
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        for depth in (1, 2, 4, 8):
+        for description_depth in (1, 2, 4, 8, 34, 36, 40):
+            depth = description_depth - 32 if description_depth > 32 else description_depth
             group = {1: 16, 2: 16, 4: 8, 8: 4}[depth]
             for codec, repeat in [("raw ", False), ("rle ", False), ("rle ", True)]:
                 width, height = group * 2 - 1, 2
                 colors, table = palette(depth)
+                extensions=b""
+                if description_depth>32:
+                    colors=[(255-i*255//((1<<depth)-1),)*3 for i in range(1<<depth)]
+                    table=b""
+                    extensions=(atom(b"fiel",bytes([1,0]))+atom(b"pasp",struct.pack(">II",2,2))+
+                                atom(b"clap",struct.pack(">8i",width*2,2,height*3,3,0,1,0,2))+bytes(4))
                 rows = []
                 packed_rows = []
                 for y in range(height):
@@ -103,12 +110,12 @@ def generate():
                 ffmpeg("-f", "rawvideo", "-pixel_format", "gray", "-video_size", f"{template_width}x{height}",
                        "-i", gray, "-frames:v", "1", "-c:v", "qtrle", "-y", template)
                 sample = root / "sample.mov"
-                sample.write_bytes(movie(template.read_bytes(), codec, width, height, depth, table, packet))
+                sample.write_bytes(movie(template.read_bytes(), codec, width, height, description_depth, table, packet, extensions))
                 rgb = ffmpeg("-i", sample, "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-")
                 expected = bytes(channel for row in rows for index in row for channel in colors[index])
                 assert rgb == expected, (codec, depth, rgb[:24].hex(), expected[:24].hex())
-                cases.append(dict(name=f"{codec.strip()}-{depth}-{'repeat' if repeat else 'literal'}",
-                                  codec=codec, width=width, height=height, depth=depth,
+                cases.append(dict(name=f"{codec.strip()}-{description_depth}-{'repeat' if repeat else 'literal'}",
+                                  codec=codec, width=width, height=height, depth=description_depth,extensions=extensions.hex(),
                                   palette=table.hex(), packet=packet.hex(), rgb=rgb.hex(),
                                   provenance="Authored packet, independently decoded by FFmpeg"))
         # The available encoder emits 8-bit groups as grayscale depth 40.
@@ -121,6 +128,10 @@ def generate():
         ffmpeg("-f", "rawvideo", "-pixel_format", "gray", "-video_size", f"{width}x{height}",
                "-i", gray, "-frames:v", "1", "-c:v", "qtrle", "-y", template)
         packet = ffmpeg("-i", template, "-map", "0:v:0", "-c", "copy", "-f", "data", "-")
+        rgb=ffmpeg("-i",template,"-frames:v","1","-pix_fmt","rgb24","-f","rawvideo","-")
+        assert rgb==bytes(channel for value in source for channel in (value,)*3)
+        cases.append(dict(name="rle-40-ffmpeg-encoded",codec="rle ",width=width,height=height,depth=40,
+                          palette="",packet=packet.hex(),rgb=rgb.hex(),provenance="Unmodified FFmpeg gray Animation encoding and independent decode"))
         colors, table = palette(8)
         sample = root / "encoded-paletted.mov"
         sample.write_bytes(movie(template.read_bytes(), "rle ", width, height, 8, table, packet))

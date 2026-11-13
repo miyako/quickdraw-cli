@@ -3,6 +3,16 @@
 pub fn word(value: i16) -> Vec<u8> {
     value.to_be_bytes().to_vec()
 }
+pub fn description_extensions(mut payload: Vec<u8>, extensions: &[u8]) -> Vec<u8> {
+    let mask = u32::from_be_bytes(payload[68..72].try_into().unwrap()) as usize;
+    let at = 72 + mask;
+    let size = u32::from_be_bytes(payload[at..at + 4].try_into().unwrap()) as usize;
+    payload.splice(at + size..at + size, extensions.iter().copied());
+    payload[at..at + 4].copy_from_slice(&((size + extensions.len()) as u32).to_be_bytes());
+    let total = payload.len() - 4;
+    payload[..4].copy_from_slice(&(total as u32).to_be_bytes());
+    payload
+}
 pub fn words(values: &[i16]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_be_bytes()).collect()
 }

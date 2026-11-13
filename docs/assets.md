@@ -130,6 +130,11 @@ Indexed raw/Animation depths 1/2/4/8 are additive, requiring the same explicit
 embedded palette contract. Capabilities retain the direct-depth field and add
 `quicktime_indexed_raw_animation_depths`, `quicktime_indexed_palette` and
 `quicktime_animation_frames`; no protocol, invocation or archive-schema break.
+Further additions expose explicit grayscale depths 34/36/40, validated neutral
+description suffixes and OpColor image modes 32/260. Inspection optionally retains
+suffix bytes/offset; consumers must preserve the new diagnostic and require
+whole-picture vector fallback for image blending. Existing outline profiles,
+versioned envelopes and asset schema remain unchanged.
 Schema-1 font maps now optionally select `outline:{face_index,encoding:"macroman",
 kerning:false}` for exact static TrueType sfnt/TTC input. `portable_outline_v1`
 is separately reported and requires approximate fidelity; bitmap bindings and

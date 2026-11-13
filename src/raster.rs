@@ -159,7 +159,21 @@ impl Canvas {
         let index = ((y - self.frame.top) as usize * self.frame.width()
             + (x - self.frame.left) as usize)
             * 3;
-        for (dest, source) in self.rgb[index..index + 3].iter_mut().zip(rgb) {
+        for (c, (dest, source)) in self.rgb[index..index + 3].iter_mut().zip(rgb).enumerate() {
+            if mode == 32 {
+                *dest = arithmetic(source, *dest, mode, state.op_color.map(|v| v[c]));
+                continue;
+            }
+            if mode == 260 {
+                let denominator = 255u64 * 65535;
+                let weight = u64::from(alpha)
+                    * u64::from(state.op_color.expect("validated image OpColor")[c]);
+                *dest = ((u64::from(source) * weight
+                    + u64::from(*dest) * (denominator - weight)
+                    + denominator / 2)
+                    / denominator) as u8;
+                continue;
+            }
             let a = i32::from(alpha);
             let foreground = match mode {
                 256 => i32::from(source) * a,
@@ -445,7 +459,7 @@ pub fn render(picture: &Picture, options: &RenderOptions) -> Result<Rendered> {
                 }
                 Command::Bitmap(bitmap) => {
                     if bitmap.raw_copy {
-                        image_policy(bitmap, options, &mut diagnostics, op.offset)?;
+                        image_policy(bitmap, &state, options, &mut diagnostics, op.offset)?;
                     } else {
                         state.validate(bitmap.mode, false)?;
                     }
@@ -1146,18 +1160,28 @@ fn line(
 
 pub(crate) fn image_policy(
     bitmap: &Bitmap,
+    state: &State<'_>,
     options: &RenderOptions,
     diagnostics: &mut Vec<Diagnostic>,
     offset: usize,
 ) -> Result<()> {
+    if matches!(bitmap.mode, 32 | 260) && state.op_color.is_none() {
+        return Err(Error::new(
+            ErrorCode::Unsupported,
+            "QuickTime image blend requires explicit OpColor",
+        ));
+    }
     diagnostics.push(Diagnostic::new("embedded_still_image",
         "Embedded still decoded with explicit transfer mode; no historical codec/color-profile fidelity is claimed.", Some(offset)));
-    if bitmap.affine.is_some() || bitmap.mode >= 256 {
+    if let Some((at, _)) = &bitmap.description_extensions {
+        diagnostics.push(Diagnostic::new("image_description_extensions","Validated neutral description extensions/terminator are retained by inspection; no rendering-affecting extension is ignored.",Some(*at)));
+    }
+    if bitmap.affine.is_some() || bitmap.mode != 0 {
         require_approximate(
             options,
             diagnostics,
             offset,
-            "QuickTime uses portable inverse pixel-center affine sampling and/or rounded 8-bit alpha composition, not historical device rendering",
+            "QuickTime uses portable inverse pixel-center affine sampling and/or quantized OpColor/alpha composition, not historical device rendering",
         )?;
     }
     Ok(())

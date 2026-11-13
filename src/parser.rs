@@ -629,6 +629,7 @@ fn bitmap(r: &mut Reader<'_>, op: u16, version: u8, budget: &mut Budget<'_>) -> 
         raw_copy: false,
         affine: None,
         alpha: None,
+        description_extensions: None,
     })
 }
 
@@ -661,9 +662,9 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
         ));
     }
     let mode = q.u16()?;
-    if !matches!(mode, 0 | 256 | 257 | 258) {
+    if !matches!(mode, 0 | 32 | 256 | 257 | 258 | 260) {
         return Err(unsupported(
-            "QuickTime still images support srcCopy, straight alpha and white/black premultiplied alpha modes only",
+            "QuickTime still image transfer mode is outside the copy/blend/alpha profile",
         ));
     }
     let source = q.rect()?;
@@ -719,7 +720,7 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
     d.take(32)?;
     let depth = d.u16()?;
     let supported_depth = if matches!(codec, b"raw " | b"rle ") {
-        matches!(depth, 1 | 2 | 4 | 8 | 16 | 24 | 32)
+        matches!(depth, 1 | 2 | 4 | 8 | 16 | 24 | 32 | 34 | 36 | 40)
     } else if codec == b"rpza" {
         matches!(depth, 16 | 24)
     } else if codec == b"smc " {
@@ -764,11 +765,15 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
     } else {
         None
     };
-    if d.pos != description_size {
-        return Err(unsupported(
-            "QuickTime image-description extensions are not implemented",
-        ));
-    }
+    let extension_start = d.pos;
+    description_extensions(&mut d, description_size, width, height, budget)?;
+    let extensions = if extension_start < description_size {
+        let bytes = &data[at + extension_start..at + description_size];
+        budget.allocate(bytes.len())?;
+        Some((base + at + extension_start, bytes.to_vec()))
+    } else {
+        None
+    };
     if compressed_size != data.len() - q.pos {
         return Err(malformed("QuickTime compressed image length mismatch"));
     }
@@ -817,17 +822,17 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
         palette.as_ref(),
         budget,
     )?;
-    if mode == 0
+    if matches!(mode, 0 | 32)
         && decoded
             .alpha
             .as_ref()
             .is_some_and(|a| a.iter().any(|&a| a != 255))
     {
         return Err(unsupported(
-            "nonopaque QuickTime srcCopy is outside the portable profile; an alpha transfer mode must be recorded",
+            "nonopaque QuickTime copy/blend is outside the portable profile; an alpha transfer mode must be recorded",
         ));
     }
-    if mode != 0 && decoded.alpha.is_none() {
+    if mode >= 256 && decoded.alpha.is_none() {
         return Err(unsupported(
             "QuickTime alpha mode requires an explicit alpha channel",
         ));
@@ -867,7 +872,123 @@ fn quicktime(r: &mut Reader<'_>, budget: &mut Budget<'_>) -> Result<Command> {
         raw_copy: true,
         affine: (!legacy).then_some(transform),
         alpha: decoded.alpha,
+        description_extensions: extensions,
     }))
+}
+
+fn description_extensions(
+    d: &mut Reader<'_>,
+    end: usize,
+    width: usize,
+    height: usize,
+    budget: &mut Budget<'_>,
+) -> Result<()> {
+    let mut seen = 0u8;
+    let mut count = 0usize;
+    while d.pos < end {
+        count += 1;
+        if count > budget.limits.max_operations {
+            return Err(Error::new(
+                ErrorCode::ResourceLimit,
+                "image-description extension count limit exceeded",
+            ));
+        }
+        budget.work(1)?;
+        let start = d.pos;
+        let size = d.u32()? as usize;
+        if size == 0 {
+            if d.pos == end {
+                return Ok(());
+            }
+            return Err(malformed(
+                "image-description zero terminator must be exactly the final four bytes",
+            ));
+        }
+        if size == 1 {
+            d.take(4)?;
+            let large = (u64::from(d.u32()?) << 32) | u64::from(d.u32()?);
+            if large < 16 || large > (end - start) as u64 {
+                return Err(malformed("invalid extended-size image-description extent"));
+            }
+            return Err(unsupported(
+                "extended-size image-description atoms are unsupported",
+            ));
+        }
+        if size < 8 || size > end - start {
+            return Err(malformed("invalid image-description extension extent"));
+        }
+        let kind = d.take(4)?;
+        let body = d.take(size - 8)?;
+        let (bit, expected) = match kind {
+            b"fiel" => (1, 2),
+            b"pasp" => (2, 8),
+            b"clap" => (4, 32),
+            _ => {
+                return Err(unsupported(&format!(
+                    "unsupported rendering semantics for image-description extension {:?}",
+                    String::from_utf8_lossy(kind)
+                )));
+            }
+        };
+        if seen & bit != 0 {
+            return Err(malformed("duplicate image-description semantic extension"));
+        }
+        seen |= bit;
+        if body.len() != expected {
+            return Err(malformed(
+                "invalid image-description extension payload length",
+            ));
+        }
+        let mut r = Reader::new(body, d.offset() - body.len());
+        match kind {
+            b"fiel" => {
+                if body != [1, 0] {
+                    return Err(unsupported(
+                        "only progressive single-field image descriptions are supported",
+                    ));
+                }
+            }
+            b"pasp" => {
+                let h = r.u32()?;
+                let v = r.u32()?;
+                if h == 0 || v == 0 {
+                    return Err(malformed("zero pixel-aspect spacing"));
+                }
+                if h != v {
+                    return Err(unsupported(
+                        "non-square image-description pixel aspect is unsupported",
+                    ));
+                }
+            }
+            b"clap" => {
+                let mut values = [0i64; 8];
+                for v in &mut values {
+                    *v = i64::from(r.u32()? as i32);
+                }
+                for ratio in values.chunks_exact_mut(2) {
+                    if ratio[1] < 0 {
+                        ratio[0] = -ratio[0];
+                        ratio[1] = -ratio[1];
+                    }
+                }
+                if values[0] <= 0 || values[2] <= 0 || [1, 3, 5, 7].iter().any(|&i| values[i] <= 0)
+                {
+                    return Err(malformed("invalid clean-aperture rational values"));
+                }
+                if values[0] != width as i64 * values[1]
+                    || values[2] != height as i64 * values[3]
+                    || values[4] != 0
+                    || values[6] != 0
+                {
+                    return Err(unsupported(
+                        "only full-image centered clean aperture is supported",
+                    ));
+                }
+            }
+            _ => unreachable!("validated extension type"),
+        }
+    }
+    Ok(())
 }
 
 struct MapLayout {

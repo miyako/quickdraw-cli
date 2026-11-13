@@ -136,6 +136,220 @@ fn portable(payload: &[u8], backdrop: [i16; 3]) -> quickdraw::Result<quickdraw::
     )
 }
 
+fn extension(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut data = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+    data.extend(kind);
+    data.extend(body);
+    data
+}
+fn neutral_extensions() -> Vec<u8> {
+    [
+        extension(b"fiel", &[1, 0]),
+        extension(b"pasp", &[0, 0, 0, 2, 0, 0, 0, 2]),
+        extension(
+            b"clap",
+            &[2i32, 2, 3, 3, 0, 1, 0, 2]
+                .iter()
+                .flat_map(|v| v.to_be_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        vec![0; 4],
+    ]
+    .concat()
+}
+
+#[test]
+fn neutral_description_extensions_and_terminator_preserve_pixels_and_inspection() {
+    let base = direct_payload(b"raw ", 1, 1, 24, 0, &[12, 34, 56, 0], identity_matrix());
+    for bytes in [
+        vec![0; 4],
+        neutral_extensions(),
+        extension(
+            b"clap",
+            &[-2i32, -2, -3, -3, 0, -1, 0, -2]
+                .iter()
+                .flat_map(|v| v.to_be_bytes())
+                .collect::<Vec<_>>(),
+        ),
+    ] {
+        let payload = description_extensions(base.clone(), &bytes);
+        let mut p = Pict::new(2, 8, 4);
+        let expected_offset = p.bytes.len() + 2 + 158;
+        p.op(0x8200, &payload);
+        let picture = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
+        let inspection = serde_json::to_value(picture.inspect()).unwrap();
+        let ext = &inspection["operations"][0]["image_description_extensions"];
+        assert_eq!(ext["offset"], expected_offset);
+        assert_eq!(
+            ext["data_hex"].as_str().unwrap(),
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
+        let rendered = render(&picture, &RenderOptions::default()).unwrap();
+        assert_eq!(&rendered.image.rgb()[..3], &[12, 34, 56]);
+        assert!(
+            rendered
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "image_description_extensions")
+        );
+    }
+    let data = description_extensions(base, &neutral_extensions());
+    let mut p = Pict::new(2, 8, 4);
+    p.op(0x8200, &data);
+    assert_eq!(
+        parse(
+            &p.finish(),
+            Container::Raw,
+            &Limits {
+                max_operations: 2,
+                ..Default::default()
+            }
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::ResourceLimit
+    );
+}
+
+#[test]
+fn extension_framing_rejects_truncated_duplicate_overlong_and_unknown_semantics() {
+    let base = direct_payload(b"raw ", 1, 1, 24, 0, &[1, 2, 3, 0], identity_matrix());
+    let valid = neutral_extensions();
+    for len in 1..valid.len() {
+        if [10, 26, 66].contains(&len) {
+            continue;
+        }
+        assert_eq!(
+            decode(&description_extensions(base.clone(), &valid[..len]))
+                .unwrap_err()
+                .code,
+            ErrorCode::Malformed,
+            "length {len}"
+        );
+    }
+    for bytes in [
+        vec![0; 8],
+        vec![0; 5],
+        extension(b"fiel", &[1]),
+        [extension(b"fiel", &[1, 0]), extension(b"fiel", &[1, 0])].concat(),
+        vec![255; 8],
+        vec![0, 0, 0, 7, 0, 0, 0, 0],
+        extension(b"pasp", &[0; 8]),
+        extension(b"clap", &[0; 32]),
+        vec![0, 0, 0, 1, 102, 105, 101, 108, 0, 0, 0, 0, 0, 0, 0, 8],
+    ] {
+        assert_eq!(
+            decode(&description_extensions(base.clone(), &bytes))
+                .unwrap_err()
+                .code,
+            ErrorCode::Malformed,
+            "{bytes:?}"
+        );
+    }
+    for bytes in [
+        extension(b"fiel", &[2, 1]),
+        extension(b"fiel", &[1, 9]),
+        extension(b"pasp", &[0, 0, 0, 2, 0, 0, 0, 1]),
+        extension(
+            b"clap",
+            &[2i32, 1, 1, 1, 0, 1, 0, 1]
+                .iter()
+                .flat_map(|v| v.to_be_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        extension(b"gama", &65536u32.to_be_bytes()),
+        extension(b"colr", b"nclc\0\x01\0\x01\0\x01"),
+        extension(b"avcC", &[]),
+        extension(b"btrt", &[0; 12]),
+        extension(b"zzzz", &[]),
+        vec![0, 0, 0, 1, 102, 105, 101, 108, 0, 0, 0, 0, 0, 0, 0, 16],
+    ] {
+        assert_eq!(
+            decode(&description_extensions(base.clone(), &bytes))
+                .unwrap_err()
+                .code,
+            ErrorCode::Unsupported,
+            "{bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn grayscale_depths_have_explicit_white_zero_ramps_not_default_color_palettes() {
+    for (depth, bytes, expected) in [
+        (34, vec![0x1b, 0], vec![255, 170, 85, 0]),
+        (36, vec![0x05, 0xaf], vec![255, 170, 85, 0]),
+        (40, vec![0, 85, 170, 255], vec![255, 170, 85, 0]),
+    ] {
+        let base = direct_payload(b"raw ", 4, 1, depth, 0, &bytes, identity_matrix());
+        let image = decode(&base).unwrap().image;
+        assert_eq!(
+            &image.rgb()[..12],
+            expected
+                .into_iter()
+                .flat_map(|v| [v; 3])
+                .collect::<Vec<_>>()
+        );
+        let mut palette = base.clone();
+        palette[156..158].copy_from_slice(&0u16.to_be_bytes());
+        assert_eq!(decode(&palette).unwrap_err().code, ErrorCode::Unsupported);
+    }
+    for depth in [2, 4, 8, 33, 35, 48] {
+        let data = direct_payload(b"raw ", 1, 1, depth, 0, &[0, 0], identity_matrix());
+        assert_eq!(decode(&data).unwrap_err().code, ErrorCode::Unsupported);
+    }
+}
+
+#[test]
+fn image_blend_requires_recorded_opcolor_and_preserves_channel_weight_endpoints() {
+    for mode in [32, 260] {
+        let data = direct_payload(
+            b"raw ",
+            1,
+            1,
+            32,
+            mode,
+            &[255, 200, 100, 50],
+            identity_matrix(),
+        );
+        assert_eq!(
+            portable(&data, [0; 3]).unwrap_err().code,
+            ErrorCode::Unsupported
+        );
+        let mut p = Pict::new(2, 8, 4);
+        p.op(0x1a, &words(&[2570, 5140, 7710]))
+            .op(0x31, &rect(0, 0, 4, 8))
+            .op(0x1f, &words(&[0, -1, -32768]))
+            .op(0x8200, &data);
+        let pic = parse(&p.finish(), Container::Raw, &Limits::default()).unwrap();
+        assert_eq!(
+            render(&pic, &RenderOptions::default()).unwrap_err().code,
+            ErrorCode::Unsupported
+        );
+        let image = render(
+            &pic,
+            &RenderOptions {
+                fidelity: quickdraw::Fidelity::Approximate,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .image;
+        assert_eq!(&image.rgb()[..3], &[10, 100, 40]);
+        assert_eq!(&image.rgb()[3..6], &[10, 20, 30]);
+    }
+    for (mode, depth, bytes) in [
+        (32, 32, vec![128, 10, 20, 30]),
+        (260, 24, vec![10, 20, 30, 0]),
+    ] {
+        let data = direct_payload(b"raw ", 1, 1, depth, mode, &bytes, identity_matrix());
+        assert_eq!(
+            portable(&data, [0; 3]).unwrap_err().code,
+            ErrorCode::Unsupported
+        );
+    }
+}
+
 #[test]
 fn raw_rgb555_rgb24_padding_and_argb_have_declared_channel_order() {
     for (depth, bytes, expected) in [
